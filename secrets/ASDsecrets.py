@@ -8,6 +8,7 @@ import sys
 import pickle
 from random import randint
 from typing import Any
+from pathlib import Path
 
 from . import ASDcoderAES  # written by me back in 2019, optimized in 2021
 from . import mygram       # same AES, but with outstanding optimization from Telegram developers! Bonus: ige256, cbc256, TDF-reader and KeyFile-reader
@@ -63,23 +64,23 @@ def test():
     print("tg AES:", T3 - T2)  # 0.018413782119750977, i.e. slightly slower?!?!?!?!?
 
 
-def get_appdata_path() -> str:
+def get_appdata_path() -> Path:
     if sys.platform.startswith("win"):
         # On Windows use the APPDATA environment variable
-        return os.environ.get("APPDATA", os.path.expanduser(r"~\AppData\Roaming"))
+        return Path(os.environ.get("APPDATA", os.path.expanduser(r"~\AppData\Roaming")))
     else:
         # On Linux/macOS, ~/.config is the common choice
-        return os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
+        return Path(os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")))
 
 class Storage:
-    def __init__(self, name: str, force: bool = True):
+    def __init__(self, name: str|Path, force: bool = True):
         self.force = force
         self.salt = None
 
         appdata = get_appdata_path()
-        workdir = os.path.join(appdata, "ASD_storage")
-        os.makedirs(workdir, exist_ok=True)
-        self.path = os.path.join(workdir, name)
+        workdir = appdata / "ASD_storage"
+        workdir.mkdir(parents=True, exist_ok=True)
+        self.path = workdir / name
         self.pw_base = {}
         self.load_passwords()
 
@@ -117,8 +118,12 @@ class Storage:
         eK = self.password_to_ek(password)
         return False, eK
 
-    def store(self, obj: Any, password: str|None, path: str, name: str|None = None):
-        key = os.path.abspath(path)
+    def store(self, obj: Any, password: str|None, path: str|Path, name: str|None = None):
+        if isinstance(path, str):
+            path = Path(path)
+        path = path.resolve()
+
+        key = str(path)
         if password is None:
             _, eK = self.check_password(key, name)
         else:
@@ -134,16 +139,22 @@ class Storage:
         if self.force:
             salt = self.salt
             assert isinstance(salt, bytes) and len(salt) == 32
-        with open(path, "wb") as file:
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as file:
             file.write(iv)
             if self.force: file.write(salt)
             file.write(encoded)
 
         self.store_password(key, eK)
 
-    def load(self, path: str, name: str|None = None) -> Any:
+    def load(self, path: str|Path, name: str|None = None) -> Any:
+        if isinstance(path, str):
+            path = Path(path)
+        path = path.resolve()
+
         try:
-            with open(path, "rb") as file:
+            with path.open("rb") as file:
                 iv = file.read(16)
                 if self.force: self.salt = file.read(32)
                 encoded = file.read()
@@ -151,7 +162,7 @@ class Storage:
             return
 
         while True:
-            key = os.path.abspath(path)
+            key = str(path)
             stored, eK = self.check_password(key, name)
             eK2 = mygram.aes256_set_decryption_key(eK, is_eK = True)
 
@@ -170,14 +181,19 @@ class Storage:
         self.store_password(key, eK)
         return result
 
-    def to_force(self, path: str, name: str|None = None):
-        assert not self.force, "Storage is already in forced password mode!"
+    def to_force(self, path: str|Path, name: str|None = None):
+        if self.force:
+            raise RuntimeError("Storage is already in forced password mode!")
+
+        if isinstance(path, str):
+            path = Path(path)
+        path = path.resolve()
 
         data = self.load(path, name)
         assert data is not None
         # print(data)
 
-        key = os.path.abspath(path)
+        key = str(path)
         self.pw_base.pop(key)
         self.force = True
 
