@@ -125,7 +125,16 @@ class Storage:
 
         key = str(path)
         if password is None:
-            _, eK = self.check_password(key, name)
+            old_eK, eK = self.check_password(key, name)
+            if self.force and self.salt is None and old_eK:
+                if path.exists():
+                    with path.open("rb") as file:
+                        file.seek(16)
+                        self.salt = file.read(32)
+                else:
+                    # eK exists but salt is unknown because file is missin
+                    del self.pw_base[key]
+                    _, eK = self.check_password(key, name)
         else:
             eK = self.password_to_ek(password)
 
