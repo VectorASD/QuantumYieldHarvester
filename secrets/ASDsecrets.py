@@ -9,8 +9,8 @@ import pickle
 from random import randint
 from typing import Any
 
-import ASDcoderAES  # written by me back in 2019, optimized in 2021
-import mygram       # same AES, but with outstanding optimization from Telegram developers! Bonus: ige256, cbc256, TDF-reader and KeyFile-reader
+from . import ASDcoderAES  # written by me back in 2019, optimized in 2021
+from . import mygram       # same AES, but with outstanding optimization from Telegram developers! Bonus: ige256, cbc256, TDF-reader and KeyFile-reader
 
 ASDcoderAES.Nr = 14  # originally 10; changed to 14 because in Java and elsewhere it's configured this way...
 
