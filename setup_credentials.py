@@ -6,7 +6,7 @@ from secrets import Storage
 from pathlib import Path
 
 
-SAVE_PATH = Path("bases") / "credentials.asd"
+CREDENTIALS_FILE = Path("bases") / "credentials.asd"
 
 def is_oauth_client_json(data: json_value) -> bool:
     """Check if data is a valid OAuth client JSON"""
@@ -31,7 +31,7 @@ def is_oauth_client_json(data: json_value) -> bool:
 def check_save():
     storage = Storage("credential_keys.asd")
     print("Check reading of file: ", end='', flush=True)
-    obj = storage.load(SAVE_PATH)
+    obj = storage.load(CREDENTIALS_FILE)
     if obj is None:
         print("FAILED")
     else:
@@ -41,9 +41,15 @@ def check_save():
 
 
 def main():
-    print(Storage)
-    obj = User.get_json(
-        "Create OAuth client ID: https://console.cloud.google.com/auth/clients/create\nApplication type: Desktop app",
+    obj = User.get_json("""
+Create OAuth client ID: https://console.cloud.google.com/auth/clients/create
+Application type: Desktop app
+
+!!! Important: After creating credentials, you must add your email as a test user:
+!!! Go to: https://console.cloud.google.com/auth/audience
+!!! (Google Auth Platform -> Audience -> Test users -> "+ Add users")
+!!! Enter your Gmail address there. Otherwise you will get 403 access_denied when trying to get tokens.
+        """.strip(),
         "Select Google OAuth client JSON"
     )
     if obj is None:
@@ -54,9 +60,10 @@ def main():
         return
 
     storage = Storage("credential_keys.asd")
-    storage.store(obj, None, SAVE_PATH)
+    storage.store(obj, None, CREDENTIALS_FILE)
     check_save()
 
 
 if __name__ == "__main__":
     main()
+  # check_save()
