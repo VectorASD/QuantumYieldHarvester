@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Fingerprint Test</title>
+    <script src="fingerprint.js"></script>
+</head>
+<body>
+    <h1>Fingerprint Test</h1>
+    <button onclick="getFingerprint()">Get Fingerprint</button>
+    <pre id="result"></pre>
+
+    <script>
+        const saved_fp_parts = {
+            "applePay": "b2bf54365d8a755635bd4f8e5122c2af",
+            "architecture": "586f8d4903f56c569194b84fbf595dca",
+            "audio": "81c423152c811da0c92dcbe04435dbfe",
+            "audioBaseLatency": "ac3f61e56b486ad9ff37e6ecdee9f480",
+            "canvas": "522f4a6b7965b4df2429f38af6d97e4a",
+            "colorDepth": "0682422e0917c276e933859eec6ab13f",
+            "colorGamut": "cb48b41a86bf22ae5cd4dc5a8dffe2b5",
+            "contrast": "5c9feb77643a5d89ff56d33c2a493337",
+            "cookiesEnabled": "139dc88ba75f511f31730e73137716a5",
+            "cpuClass": "a5a1eed2271d33b0165e7bc03c8f98cc",
+            "dateTimeLocale": "14ffe9b441c189a02519ae6c6cfdf3b2",
+            "deviceMemory": "fdd03b4d0c2a589f30fb0a2637b786a9",
+            "domBlockers": "afe5b97dd4aae97f85644b13d7df2cdc",
+            "fontPreferences": "92180df059cde666ccc80feab7b36b15",
+            "fonts": "d4413ad01a4fa6ec870bda1c2682abd4",
+            "forcedColors": "b21563865b4dd5dbc7cc273c727a2b1e",
+            "hardwareConcurrency": "ea9e69e20ad55430f98af0619c9eeb13",
+            "hdr": "4e29d378948bb72047d213054b7aa214",
+            "indexedDB": "19c0b93efe34d484925463db16b65cab",
+            "invertedColors": "9818dcef6dbe1d3b35ad6e346629cad6",
+            "languages": "694e5794abeca50fb132f9999d5f3ce3",
+            "localStorage": "d762e5b12f0b0195d3db7979b88ed03a",
+            "math": "04c1fa842af7f17d024e870fe2e52d15",
+            "monochrome": "c4b9deddd92ed7f026b90e1ec6a8b4ea",
+            "openDatabase": "b9893ef29c99472ccf2eaba33434de83",
+            "osCpu": "6616c68632c973a41bd559ec59ad34b9",
+            "pdfViewerEnabled": "45c8933d295c6a56f8e9a5a1d861419a",
+            "platform": "cadb5c2619511ff97a6aff7d5bf849e5",
+            "plugins": "7bf9267ddde7a33539244ab8ffe927d5",
+            "privateClickMeasurement": "7e19280ce5dbc983e155a0c5ee7cf825",
+            "reducedMotion": "2f85a631a55673c4cf85a9679766114b",
+            "reducedTransparency": "3769bc496003f1abcffafcd680e75ab8",
+            "screenFrame": "e6f47daa2c6122f3b433179bfe0426a0",
+            "screenResolution": "9595ec02d0e1ab93b164e0b83da026fd",
+            "sessionStorage": "ffdb619ca40a0ec07cab16c7ea163a6b",
+            "timezone": "69b4a93115fc6e1b7795704bf0179f17",
+            "touchSupport": "93b25d25c807e60947078207a39372a5",
+            "userAgentData": "1720102e8ef6df9e1cf49a46681bd061",
+            "vendor": "c2c01b4de5ca34fa65f4e29b1fc4656c",
+            "vendorFlavors": "e4a5a0af3c2405262935653dc5cb782f",
+            "webGlBasics": "f8381dca14d87ba7b4ee45f10671f02f",
+            "webGlExtensions": "54e2d251eb564e8aad4c4093ca9964a5",
+        };
+
+        const fpLib = FingerprintJS();
+        window.FingerprintJS = fpLib;
+
+        async function getFingerprint() {
+            const fp = await fpLib.load();
+            const result = await fp.get();
+            const output_lines = [];
+            const fp_parts = {}
+
+            for (const key of Object.keys(result.components).sort()) {
+                const component_fp = fpLib.hashComponents({[key]: result.components[key]});
+                const is_equal = saved_fp_parts[key] == component_fp;
+                output_lines.push((is_equal ? '+' : '-') + ' ' + component_fp + ' ' + key);
+                fp_parts[key] = component_fp;
+            }
+            output_lines.push(JSON.stringify(result, null, 2));
+
+            document.getElementById('result').textContent = output_lines.join('\n');
+            window.fp_parts = fp_parts;
+        }
+    </script>
+</body>
+</html>
