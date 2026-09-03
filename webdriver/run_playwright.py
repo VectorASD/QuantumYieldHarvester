@@ -1,5 +1,6 @@
-from playwright.async_api import async_playwright
 import psutil
+from playwright.async_api import async_playwright
+from playwright_stealth import Stealth
 
 from pathlib import Path
 import asyncio
@@ -36,6 +37,9 @@ INIT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {
     get: () => false
 });
+
+Object.defineProperty(navigator, 'language', { get: () => 'ru' });
+Object.defineProperty(navigator, 'languages', { get: () => ['ru-RU', 'en', 'da'] });
 
 Object.defineProperty(screen, 'availTop', { get: () => 0 });
 Object.defineProperty(screen, 'availLeft', { get: () => 0 });
@@ -162,10 +166,13 @@ async def run_v2(url: str, e_path: str|Path, e_name: str, cb_factory: Callable|N
         ctx = await browser.new_context(
             viewport={"width": 1920, "height": 1080},
             screen={"width": 1920, "height": 1080},
-            locale="ru",
         )
-        ctx.on("page", on_page)
+      # await ctx.set_extra_http_headers({
+      #     "Accept-Language": "ru,en;q=0.9,da;q=0.8",
+      # })
         await ctx.add_init_script(INIT_SCRIPT)
+
+        ctx.on("page", on_page)
 
         if cookies:
             await ctx.add_cookies(cookies)
@@ -174,6 +181,9 @@ async def run_v2(url: str, e_path: str|Path, e_name: str, cb_factory: Callable|N
 
         page = await ctx.new_page()  # this adds the first context to browser.contexts
         # ctx = browser.contexts[0]  # equivalent to browser.new_context()
+        await Stealth(
+            navigator_languages_override=("ru-RU", "ru"),
+        ).apply_stealth_async(page)
 
         # print(ctx.pages)  # [<Page url='about:blank'>]
         asyncio.create_task(page.goto(url))
