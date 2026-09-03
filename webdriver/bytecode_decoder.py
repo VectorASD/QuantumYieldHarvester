@@ -3,6 +3,7 @@ from struct import unpack
 from collections import deque
 from pathlib import Path
 import re
+from io import StringIO
 
 
 bytecode_path = Path(__file__).parent / "polygon" / "challenge2.js"
@@ -28,13 +29,14 @@ reg_names[ 91] = "Array"
 reg_names[125] = "document"
 reg_names[176] = "Object"
 reg_names[200] = "pos"  # instruction counter
+reg_names[201] = "result"
 reg_names[229] = "Number"
 reg_names[253] = "(void 0)"
 reg_names[254] = "c1"  # constant 1
 reg_names[255] = "c0"  # constant 0
 def reg2name(idx):
     name = reg_names[idx]
-    return f"regs[{idx}]" if name is None else name
+    return f"reg{idx}" if name is None else name
 
 
 def getByte():
@@ -82,39 +84,101 @@ def Caesar(shift, right, left):
 # exit()
 
 
+print_dispatch = [None] * 256
+print_dispatch[  1] = lambda write, inst: write(f"  c | {reg2name(inst[1])} = {repr(inst[2]) if isinstance(inst[2], str) else inst[2]}\n")
+print_dispatch[  5] = lambda write, inst: write(f"  5 | {reg2name(inst[1])} = [{', '.join(map(reg2name, inst[2]))}]\n")
+print_dispatch[ 10] = lambda write, inst: write(f" 10 | {reg2name(inst[1])} = {reg2name(inst[2])}[{reg2name(inst[3])}]\n")
+print_dispatch[ 11] = lambda write, inst: write(f" 11 | {reg2name(inst[1])} = {reg2name(inst[2])}.apply({reg2name(inst[3])}, {inst[4]})\n")
+def print_op_13(write, inst):
+    _, goto, code, regs = inst
+    write(f" 13 | reg_backups.push([regs[:], {code}])\n")
+    for dst, src in regs:
+        write(f"      {reg2name(dst)} = {reg2name(src)}\n")
+    write(f"      call {goto}\n")
+print_dispatch[ 13] = print_op_13
+def print_op_14(write, inst):
+    _, result_reg, regs = inst
+    write(" 14 | _regs, ret_reg = reg_backups.pop()\n")
+    write(f"      _regs[ret_reg] = {reg2name(result_reg)}\n")
+    if regs:
+        write(f"      mod_regs |= {set(regs)}\n")
+    write("      _regs[mod_regs] = regs[mod_regs]\n")
+    write("      if len(reg_backups) == 0: mod_regs.clear()\n")
+    write("      regs = _regs\n")
+print_dispatch[ 14] = print_op_14
+print_dispatch[ 15] = lambda write, inst: write(f" 15 | {reg2name(inst[1])} = {reg2name(inst[2])}\n")
+print_dispatch[ 16] = lambda write, inst: write( " 16 | HALT\n")
+print_dispatch[ 17] = lambda write, inst: write(f" 17 | goto {inst[1]} if {reg2name(inst[2])} else {inst[3]}\n")
+print_dispatch[ 18] = lambda write, inst: write(f" 18 | goto {inst[1]}\n")
+def print_op_20(write, inst):
+    _, reg, goto, args = inst
+    write(f" 20 | {reg2name(reg)} = function() {{\n")
+    if args:
+        write(f"  {args} = arguments\n")
+    write(f"        reg_backups.push([regs[:], {reg2name(201)!r})\n")
+    write(f"        call {goto} while !{reg2name(201)}\n")
+    write(f"        return (delete {reg2name(201)})\n")
+    write("      }\n")
+print_dispatch[ 20] = print_op_20
+print_dispatch[ 21] = lambda write, inst: write(f" 21 | {reg2name(inst[1])}[{reg2name(inst[2])}] = {reg2name(inst[3])}\n")
+print_dispatch[ 50] = lambda write, inst: write(f" 5_ | {reg2name(inst[1])} = {reg2name(inst[2])} {inst[3]} {reg2name(inst[4])}\n")
+print_dispatch[100] = lambda write, inst: write(f"10_ | {reg2name(inst[1])} = {reg2name(inst[2])} {inst[3]} {reg2name(inst[4])}\n")
+
+def inst2str(inst):
+    buffer = StringIO()
+    print_dispatch[inst[0]](buffer.write, inst)
+    return buffer.getvalue()
+def bb2str(bb, insts):
+    buffer = StringIO()
+    write = buffer.write
+    write(f"~~~ {bb}\n")
+    for inst in insts:
+        print_dispatch[inst[0]](write, inst)  
+    return buffer.getvalue()
+def print_cfg(FF):
+    blocks, preds, succs, calls = FF
+    for bb, insts in blocks.items():
+        bb_name = (str(bb), f"  // preds: {preds[bb]}" if preds[bb] else '', f"  // calls: {calls[bb]}" if calls[bb] else '')
+        print(bb2str(''.join(bb_name), insts))
+
+
+EOB = True  # end of block
+
 def op_1():
     reg = getByte()
     str = loadString()
-    print(f"  1 | {reg2name(reg)} = {str!r}")
+    return 0, (1, reg, str)  # {reg2name(reg)} = {str!r}
 def op_2():
     reg = getByte()
     num = getByte()
-    print(f"  2 | {reg2name(reg)} = {num}")
+    return 0, (1, reg, num)  # {reg2name(reg)} = {num}
 def op_3():
     reg = getByte()
     num = loadFloat()
-    print(f"  3 | {reg2name(reg)} = {num}")
+    return 0, (1, reg, num)  # {reg2name(reg)} = {num}
 def op_4():
     reg = getByte()
     num = loadLongNum()
-    print(f"  4 | {reg2name(reg)} = {num}")
+    return 0, (1, reg, num)  # {reg2name(reg)} = {num}
 def op_5():
     reg = getByte()
-    arr = loadArrayFromRegister()
-    print(f"  5 | {reg2name(reg)} = {arr}")
+    arr = loadRegistersArray()
+    return 0, (5, reg, arr)  # {reg2name(reg)} = {arr}
 
 def op_10():
     set_reg = getByte()
     arr_reg = getByte()
     idx_reg = getByte()
-    print(f" 10 | {reg2name(set_reg)} = {reg2name(arr_reg)}[{reg2name(idx_reg)}]]")
+    # {reg2name(set_reg)} = {reg2name(arr_reg)}[{reg2name(idx_reg)}]]
+    return 0, (10, set_reg, arr_reg, idx_reg)
 
 def op_11():
     set_reg = getByte()
     func_reg = getByte()
     this_reg = getByte()
     arr = loadArrayFromRegister()
-    print(f" 11 | {reg2name(set_reg)} = {reg2name(func_reg)}.apply({reg2name(this_reg)}, {arr})")
+    # {reg2name(set_reg)} = {reg2name(func_reg)}.apply({reg2name(this_reg)}, {arr})
+    return 0, (11, set_reg, func_reg, this_reg, arr)
 
 # 12 - eval
 
@@ -122,70 +186,53 @@ def op_13():
     goto = loadLongNum()
     code = getByte()
     regs = loadRegistersArray()
-    print(f" 13 | reg_backups.push([regs[:], {code}])")
     assert len(regs) % 2 == 0
-    for i in range(0, len(regs), 2):
-        print(f"      {reg2name(regs[i])} = {reg2name(regs[i+1])}")
-    print(f"      goto {goto}")
+    regs = [(regs[i], regs[i+1]) for i in range(0, len(regs), 2)]
     queue.append(goto)
+    return 0, [13, goto, code, regs]  # call
 
 def op_14():
     result_reg = getByte()
     regs = loadRegistersArray()
-    print(" 14 | _regs, ret_reg = reg_backups.pop()")
-    print(f"      _regs[ret_reg] = {reg2name(result_reg)}")
-    print(f"      mod_regs |= {set(regs)}")
-    print("      _regs[mod_regs] = regs[mod_regs]")
-    print("      if len(reg_backups) == 0: mod_regs.clear()")
-    print("      regs = _regs")
-    return True  # eob
+    return EOB, (14, result_reg, regs)  # return
 
 def op_15():
     dst = getByte()
     src = getByte()
-    print(f" 15 | {reg2name(dst)} = {reg2name(src)}")
+    return 0, (15, dst, src)  # {reg2name(dst)} = {reg2name(src)}
 
 def op_16():
-    print(" 16 | HALT")
-    return True  # eob
+    return EOB, (16,)  # HALT
 def op_17():
     reg = getByte()
     goto = loadLongNum()
-    print(f" 17 | goto {goto} if {reg2name(reg)} else {pos}")
     queue.append(pos)
     queue.append(goto)
-    return True  # eob
+    return EOB, [17, goto, reg, pos]  # goto {goto} if {reg2name(reg)} else {pos}
 def op_18():
     goto = loadLongNum()
-    print(f" 18 | goto {goto}")
     queue.append(goto)
-    return True  # eob
+    return EOB, [18, goto]  # goto {goto}
 def op_19():
     reg = getByte()
     goto = loadLongNum()
-    print(f" 19 | goto {pos} if {reg2name(reg)} else {goto}")
     queue.append(pos)
     queue.append(goto)
-    return True  # eob
+    return EOB, [17, pos, reg, goto]  # goto {pos} if {reg2name(reg)} else {goto}
 
 def op_20():
     reg = getByte()
     goto = loadLongNum()
     args = loadArrayFromRegister()
-    print(f" 20 | {reg2name(reg)} = function() {{")
-    if args:
-        print(f"  {args} = arguments")
-    print(f"        reg_backups.push([regs[:], 201])")
-    print(f"        call {goto} while !regs[201]")
-    print(f"        return (delete regs[201])")
-    print("      }")
     queue.append(goto)
+    return 0, [20, reg, goto, args]
 
 def op_21():
     arr_reg = getByte()
     idx_reg = getByte()
     val_reg = getByte()
-    print(f" 21 | {reg2name(arr_reg)}[{reg2name(idx_reg)}] = {reg2name(val_reg)}")
+    return 0, (21, arr_reg, idx_reg, val_reg)  # {reg2name(arr_reg)}[{reg2name(idx_reg)}] = {reg2name(val_reg)}
+
 # 22 - catch
 # 23 - throw
 
@@ -193,63 +240,63 @@ def op_50():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f" 50 | {reg2name(reg)} = {reg2name(L)} == {reg2name(R)}")
+    return 0, (50, reg, L, "==", R)
 def op_51():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f" 51 | {reg2name(reg)} = {reg2name(L)} != {reg2name(R)}")
+    return 0, (50, reg, L, "!=", R)
 def op_52():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f" 52 | {reg2name(reg)} = {reg2name(L)} === {reg2name(R)}")
+    return 0, (50, reg, L, "===", R)
 def op_53():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f" 53 | {reg2name(reg)} = {reg2name(L)} !== {reg2name(R)}")
+    return 0, (50, reg, L, "!==", R)
 def op_54():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f" 54 | {reg2name(reg)} = {reg2name(L)} < {reg2name(R)}")
+    return 0, (50, reg, L, '<', R)
 def op_55():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f" 55 | {reg2name(reg)} = {reg2name(L)} > {reg2name(R)}")
+    return 0, (50, reg, L, '>', R)
 def op_56():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f" 56 | {reg2name(reg)} = {reg2name(L)} <= {reg2name(R)}")
+    return 0, (50, reg, L, "<=", R)
 def op_57():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f" 57 | {reg2name(reg)} = {reg2name(L)} >= {reg2name(R)}")
+    return 0, (50, reg, L, ">=", R)
 
 def op_100():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f"100 | {reg2name(reg)} = {reg2name(L)} + {reg2name(R)}")
+    return 0, (100, reg, L, '+', R)
 def op_101():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f"101 | {reg2name(reg)} = {reg2name(L)} * {reg2name(R)}")
+    return 0, (100, reg, L, '*', R)
 def op_102():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f"102 | {reg2name(reg)} = {reg2name(L)} - {reg2name(R)}")
+    return 0, (100, reg, L, '-', R)
 def op_103():
     reg = getByte()
     L = getByte()
     R = getByte()
-    print(f"103 | {reg2name(reg)} = {reg2name(L)} / {reg2name(R)}")
+    return 0, (100, reg, L, '/', R)
 
 
 ops = [None] * 256
@@ -266,7 +313,7 @@ ops[50:58] = op_50, op_51, op_52, op_53, op_54, op_55, op_56, op_57  # compariso
 ops[100:104] = op_100, op_101, op_102, op_103  # arithmetic
 
 queue = deque()
-def main(start_pos=0):
+def stage1(start_pos=0):
     global pos
 
     visited = [False] * len(bytecode)
@@ -280,15 +327,16 @@ def main(start_pos=0):
         if visited[pos]:
             continue
         subprograms.add(start_pos)
-        print("\nstart_pos:", pos)
+      # print("\nstart_pos:", pos)
         while pos < len(bytecode):
             kind = getByte()
             if ops[kind] is None:
                 print("kind:", kind)
                 exit()
-            if ops[kind]():
+            eob, _ = ops[kind]()
+            if eob:
                 break
-        print("end_pos:", pos)
+      # print("end_pos:", pos)
         for i in range(start_pos, pos):
             visited[i] = True
 
@@ -298,6 +346,87 @@ def main(start_pos=0):
     print("gotos:", len(gotos))
     ungotos = set(goto for goto in gotos if goto not in subprograms)
     print("ungotos:", len(ungotos))
+    return gotos
+
+
+class Block:
+    def __init__(self, name):
+        self.name = name
+    def __repr__(self):
+        return f"BB{self.name}"
+
+def make_cfg(blocks):
+    succs = {bb: set() for bb in blocks}
+    calls = {bb: set() for bb in blocks}
+    for bb, insts in blocks.items():
+        for inst in insts:
+            kind = inst[0]
+            if kind == 13:
+                calls[inst[1]].add(bb)
+            elif kind == 20:
+                calls[inst[2]].add(bb)
+        term_inst = insts[-1]
+        kind = term_inst[0]
+        if kind in (17, 18):
+            succs[bb].add(term_inst[1])
+            if kind == 17:
+                succs[bb].add(term_inst[3])
+        elif kind == 20:
+            succs[bb].add(term_inst[2])
+
+    preds = {bb: [] for bb in blocks}
+    for bb, bb_succ in succs.items():
+        for succ in bb_succ:
+            preds[succ].append(bb)
+    return blocks, preds, succs, calls
+
+
+def stage2(gotos):
+    global pos
+    _range = range(len(bytecode))
+    for goto in gotos:
+        assert goto in _range
+
+    gotos.add(len(bytecode))
+    gotos = sorted(gotos)
+    goto2bb = {goto: Block(i) for i, goto in enumerate(gotos)}
+    blocks = {}
+
+    for i in range(len(gotos) - 1):
+        start_pos = pos = gotos[i]
+        end_pos = gotos[i+1]
+        insts = []
+        add = insts.append
+        while pos < end_pos:
+            kind = getByte()
+            eob, inst = ops[kind]()
+            if pos < end_pos:
+                assert not eob
+            add(inst)
+            if kind == 13:
+                inst[1] = goto2bb[inst[1]]
+            elif kind == 20:
+                inst[2] = goto2bb[inst[2]]
+        if not eob:
+            add([18, pos])  # goto {pos}
+
+        term_inst = insts[-1]
+        kind = term_inst[0]
+        if kind in (17, 18):
+            term_inst[1] = goto2bb[term_inst[1]]
+            if kind == 17:
+                term_inst[3] = goto2bb[term_inst[3]]
+        elif kind == 20:
+            term_inst[2] = goto2bb[term_inst[2]]
+        blocks[goto2bb[start_pos]] = insts
+
+    FF = make_cfg(blocks)
+    print_cfg(FF)
+
+
+def main():
+    gotos = stage1()
+    stage2(gotos)
 
 
 if __name__ == "__main__":
