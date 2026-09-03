@@ -13,6 +13,13 @@ if not match:
 bytecode = b64decode(match.group(1))
 # print(len(bytecode))  # 28728
 
+class Undefined:
+    def __repr__(self):
+        return "undefined"
+class Null:
+    def __repr__(self):
+        return "null"
+
 reg_names = [None] * 256
 reg_names[  1] = "Function"
 reg_names[ 28] = "String"
@@ -35,7 +42,10 @@ reg_names[253] = "(void 0)"
 reg_names[254] = "c1"  # constant 1
 reg_names[255] = "c0"  # constant 0
 
-class Expression: pass
+class Expression:
+    def evaluate(self):
+        """Returns either None or {"value": evaluated}."""
+        pass
 
 class Reg(Expression):
     def __init__(self, id):
@@ -50,6 +60,10 @@ class Reg(Expression):
         return hash(self.id)
     def uses(self, add):
         add(self)
+    def replace(self, get):
+        return get(self, self)
+_regbase = tuple(Reg(id) for id in range(256))
+_name2reg = {name: _regbase[id] for id, name in enumerate(reg_names) if name is not None}
 
 class RegIndex(Expression):
     def __init__(self, reg, index):
@@ -58,14 +72,20 @@ class RegIndex(Expression):
     def __repr__(self):
         index = self.index
         if isinstance(index, str) and index.isidentifier():
-            return f"{self.reg}.{index}"
-        return f"{self.reg}[{index!r}]"
+            return f"{self.reg!r}.{index}"
+        return f"{self.reg!r}[{index!r}]"
     def uses(self, add):
         reg, index = self.reg, self.index
         if isinstance(reg, Expression):
             reg.uses(add)
         if isinstance(index, Expression):
             index.uses(add)
+    def replace(self, get):
+        if isinstance(self.reg, Expression):
+            self.reg = self.reg.replace(get)
+        if isinstance(self.index, Expression):
+            self.index = self.index.replace(get)
+        return self
 
 class RegArray(Expression):
     def __init__(self, items):
@@ -86,22 +106,42 @@ class RegArray(Expression):
     def expandleft(self, item):
         self.items = (item, *self.items)
         return self
+    def replace(self, get):
+        new_items = tuple(
+            item.replace(get) if isinstance(item, Expression) else item
+            for item in self.items
+        )
+        self.items = new_items
+        return self
 
 class RegCall(Expression):
     def __init__(self, func, this, args):
         self.func = func
         self.this = this
         self.args = args  # RegArray
-
     def __repr__(self):
-        return f"{self.func}.apply({self.this}, {self.args})"
-
+        return f"{self.func!r}.apply({self.this!r}, {self.args!r})"
     def uses(self, add):
         if isinstance(self.func, Expression):
             self.func.uses(add)
         if isinstance(self.this, Expression):
             self.this.uses(add)
         self.args.uses(add)
+    def replace(self, get):
+        if isinstance(self.func, Expression):
+            self.func = self.func.replace(get)
+        if isinstance(self.this, Expression):
+            self.this = self.this.replace(get)
+        self.args.replace(get)
+        return self
+    def evaluate(self):
+        func = self.func
+        if isinstance(func, Reg) and func.id == 0:
+            assert isinstance(self.this, Undefined)
+            args = self.args
+            assert len(args) == 3
+            assert isinstance(args[0], int)
+            return {"value": Caesar(*args)}
 
 class RegSetItem(Expression):
     def __init__(self, obj, index, value):
@@ -109,24 +149,53 @@ class RegSetItem(Expression):
         self.index = index
         self.value = value
     def __repr__(self):
-        return f"{self.obj}[{self.index}] = {self.value}"
+        return f"{self.obj!r}[{self.index!r}] = {self.value!r}"
     def uses(self, add):
         for part in (self.obj, self.index, self.value):
             if isinstance(part, Expression):
                 part.uses(add)
+    def replace(self, get):
+        for attr in ('obj', 'index', 'value'):
+            part = getattr(self, attr)
+            if isinstance(part, Expression):
+                setattr(self, attr, part.replace(get))
+        return self
 
 class BinOp(Expression):
+    _evaluator = {
+        '==': lambda L, R: L == R,
+        '!=': lambda L, R: L != R,
+      # '===': lambda L, R: type(L) is type(R) and L == R,
+      # '!==': lambda L, R: type(L) is type(R) and L != R,
+        '>': lambda L, R: L > R,
+        '<': lambda L, R: L < R,
+        '>=': lambda L, R: L >= R,
+        '<=': lambda L, R: L <= R,
+        '+': lambda L, R: L + R,
+        '-': lambda L, R: L - R,
+        '*': lambda L, R: L * R,
+        '/': lambda L, R: L / R if R else float("inf"),
+    }
     def __init__(self, left, op, right):
         self.left = left
         self.op = op
         self.right = right
     def __repr__(self):
-        return f"{self.left} {self.op} {self.right}"
+        return f"{self.left!r} {self.op} {self.right!r}"
     def uses(self, add):
         if isinstance(self.left, Expression):
             self.left.uses(add)
         if isinstance(self.right, Expression):
             self.right.uses(add)
+    def replace(self, get):
+        if isinstance(self.left, Expression):
+            self.left = self.left.replace(get)
+        if isinstance(self.right, Expression):
+            self.right = self.right.replace(get)
+        return self
+    def evaluate(self):
+        if isinstance(self.left, int) and isinstance(self.right, int):
+            return {"value": BinOp._evaluator[self.op](self.left, self.right)}
 
 
 def getByte():
@@ -135,7 +204,7 @@ def getByte():
     return byte
 
 def getReg():
-    return Reg(getByte())
+    return _regbase[getByte()]
 
 def loadLongNum():
     global pos
@@ -159,7 +228,7 @@ def loadFloat():
 def loadRegistersArray():
     global pos
     size = bytecode[pos]; pos += 1
-    array = RegArray(map(Reg, bytecode[pos:pos+size]))
+    array = RegArray(_regbase[byte] for byte in bytecode[pos:pos+size])
     pos += size
     return array
 
@@ -211,9 +280,9 @@ def print_op_20(write, inst):
     write(f" 20 | {reg} = function() {{\n")
     if args:
         write(f"  {str(args)[1:-1]} = arguments\n")
-    write(f"        reg_backups.push([regs[:], {Reg(201)!r})\n")
-    write(f"        call {goto} while !{Reg(201)}\n")
-    write(f"        return (delete {Reg(201)})\n")
+    write(f"        reg_backups.push([regs[:], {_regbase[201]!r})\n")
+    write(f"        call {goto} while !{_regbase[201]}\n")
+    write(f"        return (delete {_regbase[201]})\n")
     write("      }\n")
 print_dispatch[ 20] = print_op_20
 print_dispatch[ 21] = lambda write, inst: write(f" 21 | {inst[1]}\n")
@@ -233,9 +302,16 @@ def bb2str(bb, insts):
     for inst in insts:
         print_dispatch[inst[0]](write, inst)  
     return buffer.getvalue()
-def print_cfg(FF):
+def print_cfg(FF, DF_LV=None):
     blocks, preds, succs, calls = FF
+    if DF_LV is not None:
+        GEN, KILL, IN, OUT = DF_LV
     for bb, insts in blocks.items():
+        if DF_LV is not None:
+          # print("GEN:", mask2regs(GEN[bb]))
+          # print("KILL:", mask2regs(KILL[bb]))
+            print("IN:", mask2regs(IN[bb]))
+            print("OUT:", mask2regs(OUT[bb]))
         bb_name = (str(bb), f"  // preds: {preds[bb]}" if preds[bb] else '', f"  // calls: {calls[bb]}" if calls[bb] else '')
         print(bb2str(''.join(bb_name), insts))
 
@@ -444,8 +520,8 @@ def stage1(start_pos=0):
     global pos
 
     visited = [False] * len(bytecode)
-    subprograms = set()  # нормальные начала подпрограмм
-    gotos = set()  # любые переходы, даже в середину подпрограммы
+    subprograms = set()  # proper subprogram entry points
+    gotos = set()  # all jump targets, even into the middle of a subprogram
     void = lambda _: None
 
     queue.append(start_pos)
@@ -459,7 +535,7 @@ def stage1(start_pos=0):
         while pos < len(bytecode):
             kind = getByte()
             if ops[kind] is None:
-                print("kind:", kind)
+                print("unknown kind:", kind)
                 exit()
             eob = ops[kind](void)
             if eob:
@@ -506,29 +582,57 @@ def make_cfg(blocks):
             preds[succ].append(bb)
     return blocks, preds, succs, calls
 
+def clean_insts(insts):
+    try: pos = insts.index(None)
+    except ValueError: return
+    for i in range(pos+1, len(insts)):
+        item = insts[i]
+        if item is not None:
+            insts[pos] = item
+            pos += 1
+    pop = insts.pop
+    for i in range(len(insts) - pos):
+        pop()
+
+def check_users(FF):
+    blocks = FF[0]
+    users = set(); add = users.add
+    for insts in blocks.values():
+        for inst in insts:
+            if HAS_LHS[inst[0]]:
+                add(inst[1])
+    unused_regs = set(str(reg) for reg in _regbase if reg not in users)
+    defaults = {"c0": 0, "c1": 1, "(void 0)": Undefined(), "null": Null()}
+    default_const_map = {_name2reg[k]: v for k, v in defaults.items() if k in unused_regs}
+    print("\nunused regs:", unused_regs)
+    print("default const map:", default_const_map)
+    return default_const_map
+
+
 _id2shift = tuple(1 << i for i in range(256))
 def mask2regs(mask):
-    return RegArray(Reg(i) for i, shift in enumerate(_id2shift) if mask & shift)
-def live_variables(FF):
+    return RegArray(_regbase[i] for i, shift in enumerate(_id2shift) if mask & shift)
+def LiveVariables(FF):
     blocks, preds, succs, calls = FF
-    gens, kills = {}, {}
+    GEN, KILL, _KILL = {}, {}, {}
     TOP = (1 << 256) - 1
     for bb, insts in blocks.items():
-        GEN = KILL = 0
+        gen = kill = 0
         for inst in insts:
             kind = inst[0]
             if HAS_LHS[kind]:
-                KILL |= _id2shift[inst[1].id]
+                kill |= _id2shift[inst[1].id]
             idx = HAS_USES[kind]
             if idx is not None:
                 uses = set()
                 inst[idx].uses(uses.add)
                 for reg in uses:
                     shift = _id2shift[reg.id]
-                    if not KILL & shift:
-                        GEN |= shift
-        gens[bb] = GEN
-        kills[bb] = ~KILL & TOP
+                    if not kill & shift:
+                        gen |= shift
+        GEN[bb] = gen
+        KILL[bb] = kill
+        _KILL[bb] = ~kill & TOP
 
     IN = {bb: 0 for bb in blocks}
     OUT = {bb: 0 for bb in blocks}
@@ -539,21 +643,41 @@ def live_variables(FF):
             new_OUT = 0
             for succ in succs.get(bb, set()):
                 new_OUT |= IN[succ]
-            # IN[bb] = GEN[bb] | (OUT[bb] & ~KILL[bb])
-            new_IN = gens[bb] | (new_OUT & kills[bb])
+          # IN[bb] = GEN[bb] | (OUT[bb] & ~KILL[bb])
+            new_IN = GEN[bb] | (new_OUT & _KILL[bb])
 
             if new_OUT != OUT[bb] or new_IN != IN[bb]:
                 OUT[bb] = new_OUT
                 IN[bb] = new_IN
                 changed = True
 
+    return GEN, KILL, IN, OUT
+
+def ConstantPropogationAndFolding(FF, DF_LV):
+    blocks = FF[0]
+    OUT = DF_LV[3]
+    default_const_map = check_users(FF)
     for bb, insts in blocks.items():
-        print("GEN:", mask2regs(gens[bb]))
-        print("KILL:", mask2regs(~kills[bb] & TOP))
-        print("IN:", mask2regs(IN[bb]))
-        print("OUT:", mask2regs(OUT[bb]))
-        print(bb2str(bb, insts))
-    exit()
+        out = OUT[bb]
+        const_map = default_const_map.copy()
+        for i, inst in enumerate(insts):
+            kind = inst[0]
+            if kind == 1:  # <reg> = <const>
+                const_map[inst[1]] = inst[2]
+                if not (out & _id2shift[inst[1].id]):
+                    insts[i] = None
+            else:
+                idx = HAS_USES[kind]
+                if idx is not None:
+                    inst[idx].replace(const_map.get)
+                if kind in (11, 100):
+                    result = inst[2].evaluate()
+                    if result is not None:
+                        const_map[inst[1]] = result["value"]
+                        if not (out & _id2shift[inst[1].id]):
+                            insts[i] = None
+        if const_map:
+            clean_insts(insts)
 
 
 def call_blocks(insts):
@@ -607,12 +731,13 @@ def get_cycles(FF):
             cycle = dfs(bb)
             visited |= cycle
             cycles.append(cycle)
-    print("|cycles|:", len(cycles))
+    print("\n|cycles|:", len(cycles))
     for cycle in cycles:
         all_calls = set()
         for bb in cycle:
             all_calls |= calls[bb]
         print(all_calls, "->", print_colored_set(cycle, blocks, calls))
+
 
 def stage2(gotos):
     global pos
@@ -653,9 +778,11 @@ def stage2(gotos):
         blocks[goto2bb[start_pos]] = insts
 
     FF = make_cfg(blocks)
-    live_variables(FF)
-    print_cfg(FF)
     get_cycles(FF)
+    DF_LV = LiveVariables(FF)
+    ConstantPropogationAndFolding(FF, DF_LV)
+    DF_LV = LiveVariables(FF)
+    print_cfg(FF, DF_LV)
 
 
 def main():
