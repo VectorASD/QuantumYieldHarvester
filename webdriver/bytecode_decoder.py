@@ -35,13 +35,91 @@ reg_names[253] = "(void 0)"
 reg_names[254] = "c1"  # constant 1
 reg_names[255] = "c0"  # constant 0
 
-class Reg:
-    def __init__(self, idx):
-        self.idx = idx
+class Expression: pass
+
+class Reg(Expression):
+    def __init__(self, id):
+        self.id = id
     def __repr__(self):
-        idx = self.idx
-        name = reg_names[idx]
-        return f"reg{idx}" if name is None else name
+        id = self.id
+        name = reg_names[id]
+        return f"reg{id}" if name is None else name
+    def uses(self, add):
+        add(self)
+
+class RegIndex(Expression):
+    def __init__(self, reg, index):
+        self.reg = reg
+        self.index = index
+    def __repr__(self):
+        index = self.index
+        if isinstance(index, str) and index.isidentifier():
+            return f"{self.reg}.{index}"
+        return f"{self.reg}[{index!r}]"
+    def uses(self, add):
+        reg, index = self.reg, self.index
+        if isinstance(reg, Expression):
+            reg.uses(add)
+        if isinstance(index, Expression):
+            index.uses(add)
+
+class RegArray(Expression):
+    def __init__(self, items):
+        self.items = tuple(items)
+    def __repr__(self):
+        arr = ', '.join(map(repr, self.items))
+        return f"[{arr}]"
+    def __bool__(self):
+        return bool(self.items)
+    def __len__(self):
+        return len(self.items)
+    def __getitem__(self, idx):
+        return self.items[idx]
+    def uses(self, add):
+        for item in self.items:
+            if isinstance(item, Expression):
+                item.uses(add)
+
+class RegCall(Expression):
+    def __init__(self, func, this, args):
+        self.func = func
+        self.this = this
+        self.args = args  # RegArray
+
+    def __repr__(self):
+        return f"{self.func}.apply({self.this}, {self.args})"
+
+    def uses(self, add):
+        if isinstance(self.func, Expression):
+            self.func.uses(add)
+        if isinstance(self.this, Expression):
+            self.this.uses(add)
+        self.args.uses(add)
+
+class RegSetItem(Expression):
+    def __init__(self, obj, index, value):
+        self.obj = obj
+        self.index = index
+        self.value = value
+    def __repr__(self):
+        return f"{self.obj}[{self.index}] = {self.value}"
+    def uses(self, add):
+        for part in (self.obj, self.index, self.value):
+            if isinstance(part, Expression):
+                part.uses(add)
+
+class BinOp(Expression):
+    def __init__(self, left, op, right):
+        self.left = left
+        self.op = op
+        self.right = right
+    def __repr__(self):
+        return f"{self.left} {self.op} {self.right}"
+    def uses(self, add):
+        if isinstance(self.left, Expression):
+            self.left.uses(add)
+        if isinstance(self.right, Expression):
+            self.right.uses(add)
 
 
 def getByte():
@@ -74,9 +152,9 @@ def loadFloat():
 def loadRegistersArray():
     global pos
     size = bytecode[pos]; pos += 1
-    registers = tuple(map(Reg, bytecode[pos:pos+size]))
+    array = RegArray(map(Reg, bytecode[pos:pos+size]))
     pos += size
-    return registers
+    return array
 
 def Caesar(shift, right, left):
     eval = (left + right).strip()
@@ -90,16 +168,10 @@ def Caesar(shift, right, left):
 
 print_dispatch = [None] * 256
 print_dispatch[  1] = lambda write, inst: write(f"  c | {inst[1]} = {repr(inst[2]) if isinstance(inst[2], str) else inst[2]}\n")
-print_dispatch[  5] = lambda write, inst: write(f"  5 | {inst[1]} = [{', '.join(map(str, inst[2]))}]\n")
-print_dispatch[ 10] = lambda write, inst: write(f" 10 | {inst[1]} = {inst[2]}[{inst[3]}]\n")
-print_dispatch[ 11] = lambda write, inst: write(f" 11 | {inst[1]} = {inst[2]}.apply({inst[3]}, [{', '.join(map(str, inst[4]))}])\n")
-def print_op_13(write, inst):
-    _, goto, ret_reg, regs = inst
-    write(f" 13 | reg_backups.push([regs[:], {ret_reg!r}])\n")
-    for dst, src in regs:
-        write(f"      {dst} = {src}\n")
-    write(f"      call {goto}\n")
-print_dispatch[ 13] = print_op_13
+print_dispatch[  5] = lambda write, inst: write(f"  5 | {inst[1]} = {inst[2]}\n")
+print_dispatch[ 10] = lambda write, inst: write(f" 10 | {inst[1]} = {inst[2]}\n")
+print_dispatch[ 11] = lambda write, inst: write(f" 11 | {inst[1]} = {inst[2]}\n")
+print_dispatch[ 13] = lambda write, inst: write(f" 13 | reg_backups.push([regs[:], {inst[1]!r}])\n")
 def print_op_14(write, inst):
     _, result_reg, regs = inst
     write(" 14 | _regs, ret_reg = reg_backups.pop()\n")
@@ -118,15 +190,17 @@ def print_op_20(write, inst):
     _, reg, goto, args = inst
     write(f" 20 | {reg} = function() {{\n")
     if args:
-        write(f"  {', '.join(map(str, args))} = arguments\n")
+        write(f"  {str(args)[1:-1]} = arguments\n")
     write(f"        reg_backups.push([regs[:], {Reg(201)!r})\n")
     write(f"        call {goto} while !{Reg(201)}\n")
     write(f"        return (delete {Reg(201)})\n")
     write("      }\n")
 print_dispatch[ 20] = print_op_20
-print_dispatch[ 21] = lambda write, inst: write(f" 21 | {inst[1]}[{inst[2]}] = {inst[3]}\n")
-print_dispatch[ 50] = lambda write, inst: write(f" 5_ | {inst[1]} = {inst[2]} {inst[3]} {inst[4]}\n")
-print_dispatch[100] = lambda write, inst: write(f"10_ | {inst[1]} = {inst[2]} {inst[3]} {inst[4]}\n")
+print_dispatch[ 21] = lambda write, inst: write(f" 21 | {inst[1]}\n")
+print_dispatch[ 30] = lambda write, inst: write(f"      {inst[1]} = {inst[2]}\n")  # from op_13
+print_dispatch[ 31] = lambda write, inst: write(f"      call {inst[1]}\n")  # from op_13
+print_dispatch[ 50] = lambda write, inst: write(f" 5_ | {inst[1]} = {inst[2]}\n")
+print_dispatch[100] = lambda write, inst: write(f"10_ | {inst[1]} = {inst[2]}\n")
 
 def inst2str(inst):
     buffer = StringIO()
@@ -148,158 +222,188 @@ def print_cfg(FF):
 
 EOB = True  # end of block
 
-def op_1():
+def op_1(add):
     reg = getReg()
     str = loadString()
-    return 0, (1, reg, str)  # {reg} = {str!r}
-def op_2():
+    add((1, reg, str))  # {reg} = {str!r}
+    return 0
+def op_2(add):
     reg = getReg()
     num = getByte()
-    return 0, (1, reg, num)  # {reg} = {num}
-def op_3():
+    add((1, reg, num))  # {reg} = {num}
+    return 0
+def op_3(add):
     reg = getReg()
     num = loadFloat()
-    return 0, (1, reg, num)  # {reg} = {num}
-def op_4():
+    add((1, reg, num))  # {reg} = {num}
+    return 0
+def op_4(add):
     reg = getReg()
     num = loadLongNum()
-    return 0, (1, reg, num)  # {reg} = {num}
-def op_5():
+    add((1, reg, num))  # {reg} = {num}
+    return 0
+def op_5(add):
     reg = getReg()
     arr = loadRegistersArray()
-    return 0, (5, reg, arr)  # {reg} = [{', '.join(map(str, arr))}]
+    add((5, reg, arr))  # {reg} = {arr}
+    return 0
 
-def op_10():
+def op_10(add):
     set_reg = getReg()
     arr_reg = getReg()
     idx_reg = getReg()
-    return 0, (10, set_reg, arr_reg, idx_reg)  # {set_reg} = {arr_reg}[{idx_reg}]]
+    add((10, set_reg, RegIndex(arr_reg, idx_reg)))  # {set_reg} = {arr_reg}[{idx_reg}]]
+    return 0
 
-def op_11():
+def op_11(add):
     set_reg = getReg()
     func_reg = getReg()
     this_reg = getReg()
-    arr = loadRegistersArray()
-    # {set_reg} = {func_reg}.apply({this_reg}, [{', '.join(map(str, arr))}])
-    return 0, (11, set_reg, func_reg, this_reg, arr)
+    args = loadRegistersArray()
+    # {set_reg} = {func_reg}.apply({this_reg}, {args})
+    add((11, set_reg, RegCall(func_reg, this_reg, args)))
+    return 0
 
 # 12 - eval
 
-def op_13():
+def op_13(add):
     goto = loadLongNum()
     ret_reg = getByte()
     regs = loadRegistersArray()
     assert len(regs) % 2 == 0
-    regs = [(regs[i], regs[i+1]) for i in range(0, len(regs), 2)]
+    add((13, ret_reg))  # push
+    for i in range(0, len(regs), 2):
+        add((30, regs[i], regs[i+1]))  # {dst} = {src}
+    add([31, goto])  # call {goto}
     queue.append(goto)
-    return 0, [13, goto, ret_reg, regs]  # call
+    return 0
 
-def op_14():
+def op_14(add):
     result_reg = getReg()
     regs = loadRegistersArray()
-    return EOB, (14, result_reg, regs)  # return
+    add((14, result_reg, regs))  # return
+    return EOB
 
-def op_15():
+def op_15(add):
     dst = getReg()
     src = getReg()
-    return 0, (15, dst, src)  # {dst} = {src}
+    add((15, dst, src))  # {dst} = {src}
+    return 0
 
-def op_16():
-    return EOB, (16,)  # HALT
-def op_17():
+def op_16(add):
+    add((16,))  # HALT
+    return EOB
+def op_17(add):
     reg = getReg()
     goto = loadLongNum()
     queue.append(pos)
     queue.append(goto)
-    return EOB, [17, goto, reg, pos]  # goto {goto} if {reg} else {pos}
-def op_18():
+    add([17, goto, reg, pos])  # goto {goto} if {reg} else {pos}
+    return EOB
+def op_18(add):
     goto = loadLongNum()
     queue.append(goto)
-    return EOB, [18, goto]  # goto {goto}
-def op_19():
+    add([18, goto])  # goto {goto}
+    return EOB
+def op_19(add):
     reg = getReg()
     goto = loadLongNum()
     queue.append(pos)
     queue.append(goto)
-    return EOB, [17, pos, reg, goto]  # goto {pos} if {reg} else {goto}
+    add([17, pos, reg, goto])  # goto {pos} if {reg} else {goto}
+    return EOB
 
-def op_20():
+def op_20(add):
     reg = getReg()
     goto = loadLongNum()
     args = loadRegistersArray()
     queue.append(goto)
-    return 0, [20, reg, goto, args]
+    add([20, reg, goto, args])
+    return 0
 
-def op_21():
+def op_21(add):
     arr_reg = getReg()
     idx_reg = getReg()
     val_reg = getReg()
-    return 0, (21, arr_reg, idx_reg, val_reg)  # {arr_reg}[{idx_reg}] = {val_reg}
+    add((21, RegSetItem(arr_reg, idx_reg, val_reg)))  # {arr_reg}[{idx_reg}] = {val_reg}
+    return 0
 
 # 22 - catch
 # 23 - throw
 
-def op_50():
+def op_50(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (50, reg, L, "==", R)
-def op_51():
+    add((50, reg, BinOp(L, "==", R)))
+    return 0
+def op_51(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (50, reg, L, "!=", R)
-def op_52():
+    add((50, reg, BinOp(L, "!=", R)))
+    return 0
+def op_52(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (50, reg, L, "===", R)
-def op_53():
+    add((50, reg, BinOp(L, "===", R)))
+    return 0
+def op_53(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (50, reg, L, "!==", R)
-def op_54():
+    add((50, reg, BinOp(L, "!==", R)))
+    return 0
+def op_54(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (50, reg, L, '<', R)
-def op_55():
+    add((50, reg, BinOp(L, '<', R)))
+    return 0
+def op_55(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (50, reg, L, '>', R)
-def op_56():
+    add((50, reg, BinOp(L, '>', R)))
+    return 0
+def op_56(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (50, reg, L, "<=", R)
-def op_57():
+    add((50, reg, BinOp(L, "<=", R)))
+    return 0
+def op_57(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (50, reg, L, ">=", R)
+    add((50, reg, BinOp(L, ">=", R)))
+    return 0
 
-def op_100():
+def op_100(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (100, reg, L, '+', R)
-def op_101():
+    add((100, reg, BinOp(L, '+', R)))
+    return 0
+def op_101(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (100, reg, L, '*', R)
-def op_102():
+    add((100, reg, BinOp(L, '*', R)))
+    return 0
+def op_102(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (100, reg, L, '-', R)
-def op_103():
+    add((100, reg, BinOp(L, '-', R)))
+    return 0
+def op_103(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    return 0, (100, reg, L, '/', R)
+    add((100, reg, BinOp(L, '/', R)))
+    return 0
 
 
 ops = [None] * 256
@@ -322,6 +426,7 @@ def stage1(start_pos=0):
     visited = [False] * len(bytecode)
     subprograms = set()  # нормальные начала подпрограмм
     gotos = set()  # любые переходы, даже в середину подпрограммы
+    void = lambda _: None
 
     queue.append(start_pos)
     while queue:
@@ -336,7 +441,7 @@ def stage1(start_pos=0):
             if ops[kind] is None:
                 print("kind:", kind)
                 exit()
-            eob, _ = ops[kind]()
+            eob = ops[kind](void)
             if eob:
                 break
       # print("end_pos:", pos)
@@ -364,7 +469,7 @@ def make_cfg(blocks):
     for bb, insts in blocks.items():
         for inst in insts:
             kind = inst[0]
-            if kind == 13:
+            if kind == 31:
                 calls[inst[1]].add(bb)
             elif kind == 20:
                 calls[inst[2]].add(bb)
@@ -382,6 +487,66 @@ def make_cfg(blocks):
         for succ in bb_succ:
             preds[succ].append(bb)
     return blocks, preds, succs, calls
+
+def call_blocks(insts):
+    result = set()
+    for inst in insts:
+        kind = inst[0]
+        if kind == 31:
+            result.add(inst[1])
+        elif kind == 20:
+            result.add(inst[2])
+    return result
+
+RED    = "\33[91m"
+GREEN  = "\33[92m"
+YELLOW = "\33[93m"
+RESET  = "\33[0m"
+def print_colored_set(_set, blocks, calls):
+    buffer = StringIO()
+    write = buffer.write
+    write('{')
+    for i, bb in enumerate(_set):
+        if i:
+            write(", ")
+        _input = bool(calls[bb])
+        output = bool(call_blocks(blocks[bb]))
+        color = YELLOW if _input and output else GREEN if _input else RED if output else None
+        write(str(bb) if color is None else f"{color}{bb}{RESET}")
+    write('}')
+    return buffer.getvalue()
+
+def get_cycles(FF):
+    def dfs(bb):
+        visited = {bb}
+        queue = deque()
+        queue.append(bb)
+        while queue:
+            bb = queue.popleft()
+            for succ_bb in succs[bb]:
+                if succ_bb not in visited:
+                    visited.add(succ_bb)
+                    queue.append(succ_bb)
+            for pred_bb in preds[bb]:
+                if pred_bb not in visited:
+                    visited.add(pred_bb)
+                    queue.append(pred_bb)
+        return visited
+
+    blocks, preds, succs, calls = FF
+    visited = set()
+    cycles = []
+    for bb in blocks:
+        if bb not in visited:
+            cycle = dfs(bb)
+            visited |= cycle
+            cycles.append(cycle)
+    print("|cycles|:", len(cycles))
+    for cycle in cycles:
+        all_calls = set()
+        for bb in cycle:
+            all_calls |= calls[bb]
+        print(all_calls, "->", print_colored_set(cycle, blocks, calls))
 
 
 def stage2(gotos):
@@ -402,11 +567,12 @@ def stage2(gotos):
         add = insts.append
         while pos < end_pos:
             kind = getByte()
-            eob, inst = ops[kind]()
+            eob = ops[kind](add)
             if pos < end_pos:
                 assert not eob
-            add(inst)
-            if kind == 13:
+        for inst in insts:
+            kind = inst[0]
+            if kind == 31:
                 inst[1] = goto2bb[inst[1]]
             elif kind == 20:
                 inst[2] = goto2bb[inst[2]]
@@ -425,6 +591,7 @@ def stage2(gotos):
 
     FF = make_cfg(blocks)
     print_cfg(FF)
+    get_cycles(FF)
 
 
 def main():
