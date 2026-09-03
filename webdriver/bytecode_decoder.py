@@ -44,6 +44,10 @@ class Reg(Expression):
         id = self.id
         name = reg_names[id]
         return f"reg{id}" if name is None else name
+    def __eq__(self, value):
+        return isinstance(value, Reg) and self.id == value
+    def __hash__(self):
+        return hash(self.id)
     def uses(self, add):
         add(self)
 
@@ -79,6 +83,9 @@ class RegArray(Expression):
         for item in self.items:
             if isinstance(item, Expression):
                 item.uses(add)
+    def expandleft(self, item):
+        self.items = (item, *self.items)
+        return self
 
 class RegCall(Expression):
     def __init__(self, func, this, args):
@@ -166,18 +173,31 @@ def Caesar(shift, right, left):
 # exit()
 
 
+HAS_LHS = [False] * 256
+for kind in (1, 5, 10, 11, 15, 30, 31, 50, 100):
+    HAS_LHS[kind] = True
+HAS_USES = {
+    5: 2, 10: 2, 11: 2, 14: 1,
+    15: 2, 17: 2, 21: 1,
+    30: 2, 50: 2, 100: 2,
+}
+
+HAS_LHS = tuple(HAS_LHS)
+HAS_USES = tuple(HAS_USES.get(i) for i in range(256))
+
 print_dispatch = [None] * 256
 print_dispatch[  1] = lambda write, inst: write(f"  c | {inst[1]} = {repr(inst[2]) if isinstance(inst[2], str) else inst[2]}\n")
 print_dispatch[  5] = lambda write, inst: write(f"  5 | {inst[1]} = {inst[2]}\n")
 print_dispatch[ 10] = lambda write, inst: write(f" 10 | {inst[1]} = {inst[2]}\n")
 print_dispatch[ 11] = lambda write, inst: write(f" 11 | {inst[1]} = {inst[2]}\n")
-print_dispatch[ 13] = lambda write, inst: write(f" 13 | reg_backups.push([regs[:], {inst[1]!r}])\n")
+print_dispatch[ 13] = lambda write, inst: write(f" 13 | reg_backups.push([regs[:], ...])\n")
 def print_op_14(write, inst):
-    _, result_reg, regs = inst
+    _, regs = inst
+    result_reg = regs.items[0]
     write(" 14 | _regs, ret_reg = reg_backups.pop()\n")
     write(f"      _regs[ret_reg] = {result_reg}\n")
     if regs:
-        write(f"      mod_regs |= {set(regs)}\n")
+        write(f"      mod_regs |= {set(regs.items[1:])}\n")
     write("      _regs[mod_regs] = regs[mod_regs]\n")
     write("      if len(reg_backups) == 0: mod_regs.clear()\n")
     write("      regs = _regs\n")
@@ -198,7 +218,7 @@ def print_op_20(write, inst):
 print_dispatch[ 20] = print_op_20
 print_dispatch[ 21] = lambda write, inst: write(f" 21 | {inst[1]}\n")
 print_dispatch[ 30] = lambda write, inst: write(f"      {inst[1]} = {inst[2]}\n")  # from op_13
-print_dispatch[ 31] = lambda write, inst: write(f"      call {inst[1]}\n")  # from op_13
+print_dispatch[ 31] = lambda write, inst: write(f"      {inst[1]} = call {inst[2]}\n")  # from op_13
 print_dispatch[ 50] = lambda write, inst: write(f" 5_ | {inst[1]} = {inst[2]}\n")
 print_dispatch[100] = lambda write, inst: write(f"10_ | {inst[1]} = {inst[2]}\n")
 
@@ -268,20 +288,20 @@ def op_11(add):
 
 def op_13(add):
     goto = loadLongNum()
-    ret_reg = getByte()
+    ret_reg = getReg()
     regs = loadRegistersArray()
     assert len(regs) % 2 == 0
-    add((13, ret_reg))  # push
+    add((13,))  # push
     for i in range(0, len(regs), 2):
         add((30, regs[i], regs[i+1]))  # {dst} = {src}
-    add([31, goto])  # call {goto}
+    add([31, ret_reg, goto])  # {ret_reg} = call {goto}
     queue.append(goto)
     return 0
 
 def op_14(add):
     result_reg = getReg()
-    regs = loadRegistersArray()
-    add((14, result_reg, regs))  # return
+    regs = loadRegistersArray().expandleft(result_reg)
+    add((14, regs))  # return
     return EOB
 
 def op_15(add):
@@ -469,9 +489,7 @@ def make_cfg(blocks):
     for bb, insts in blocks.items():
         for inst in insts:
             kind = inst[0]
-            if kind == 31:
-                calls[inst[1]].add(bb)
-            elif kind == 20:
+            if kind in (20, 31):
                 calls[inst[2]].add(bb)
         term_inst = insts[-1]
         kind = term_inst[0]
@@ -488,13 +506,61 @@ def make_cfg(blocks):
             preds[succ].append(bb)
     return blocks, preds, succs, calls
 
+_id2shift = tuple(1 << i for i in range(256))
+def mask2regs(mask):
+    return RegArray(Reg(i) for i, shift in enumerate(_id2shift) if mask & shift)
+def live_variables(FF):
+    blocks, preds, succs, calls = FF
+    gens, kills = {}, {}
+    TOP = (1 << 256) - 1
+    for bb, insts in blocks.items():
+        GEN = KILL = 0
+        for inst in insts:
+            kind = inst[0]
+            if HAS_LHS[kind]:
+                KILL |= _id2shift[inst[1].id]
+            idx = HAS_USES[kind]
+            if idx is not None:
+                uses = set()
+                inst[idx].uses(uses.add)
+                for reg in uses:
+                    shift = _id2shift[reg.id]
+                    if not KILL & shift:
+                        GEN |= shift
+        gens[bb] = GEN
+        kills[bb] = ~KILL & TOP
+
+    IN = {bb: 0 for bb in blocks}
+    OUT = {bb: 0 for bb in blocks}
+    changed = True
+    while changed:
+        changed = False
+        for bb in blocks:
+            new_OUT = 0
+            for succ in succs.get(bb, set()):
+                new_OUT |= IN[succ]
+            # IN[bb] = GEN[bb] | (OUT[bb] & ~KILL[bb])
+            new_IN = gens[bb] | (new_OUT & kills[bb])
+
+            if new_OUT != OUT[bb] or new_IN != IN[bb]:
+                OUT[bb] = new_OUT
+                IN[bb] = new_IN
+                changed = True
+
+    for bb, insts in blocks.items():
+        print("GEN:", mask2regs(gens[bb]))
+        print("KILL:", mask2regs(~kills[bb] & TOP))
+        print("IN:", mask2regs(IN[bb]))
+        print("OUT:", mask2regs(OUT[bb]))
+        print(bb2str(bb, insts))
+    exit()
+
+
 def call_blocks(insts):
     result = set()
     for inst in insts:
         kind = inst[0]
-        if kind == 31:
-            result.add(inst[1])
-        elif kind == 20:
+        if kind in (20, 31):
             result.add(inst[2])
     return result
 
@@ -548,7 +614,6 @@ def get_cycles(FF):
             all_calls |= calls[bb]
         print(all_calls, "->", print_colored_set(cycle, blocks, calls))
 
-
 def stage2(gotos):
     global pos
     _range = range(len(bytecode))
@@ -572,9 +637,7 @@ def stage2(gotos):
                 assert not eob
         for inst in insts:
             kind = inst[0]
-            if kind == 31:
-                inst[1] = goto2bb[inst[1]]
-            elif kind == 20:
+            if kind in (20, 31):
                 inst[2] = goto2bb[inst[2]]
         if not eob:
             add([18, pos])  # goto {pos}
@@ -590,6 +653,7 @@ def stage2(gotos):
         blocks[goto2bb[start_pos]] = insts
 
     FF = make_cfg(blocks)
+    live_variables(FF)
     print_cfg(FF)
     get_cycles(FF)
 
