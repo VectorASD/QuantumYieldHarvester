@@ -64,13 +64,13 @@ class Reg(Expression):
         id = self.id
         name = reg_names[id]
         return f"reg{id}" if name is None else name
-    def __eq__(self, value):
-        return isinstance(value, Reg) and self.id == value.id
+    def __eq__(self, right):
+        return isinstance(right, Reg) and self.id == right.id
     def __hash__(self):
         return hash(self.id)
-    def __lt__(self, value):
-        if isinstance(value, Reg):
-            return self.id < value.id
+    def __lt__(self, right):
+        if isinstance(right, Reg):
+            return self.id < right.id
         return NotImplemented
     def uses(self, add):
         add(self)
@@ -269,6 +269,7 @@ class CallDef(Expression):
         for i, src in enumerate(srcs):
             if isinstance(src, Expression):
                 srcs[i] = src.replace(get)
+        return self
     def traverse(self, get):
         Expression.traverse(self, get)
         for src in self.srcs:
@@ -276,6 +277,25 @@ class CallDef(Expression):
                 src.traverse(get)
 
 CallExpression = CallDef | LambdaDef
+
+class InverseReg(Expression):
+    def __init__(self, reg: Expression | Const):
+        self.reg = reg
+    def __repr__(self):
+        if isinstance(self.reg, LambdaDef | BinOp):
+            return f"!({self.reg})"
+        return f"!{self.reg}"
+    def uses(self, add):
+        if isinstance(self.reg, Expression):
+            self.reg.uses(add)
+    def replace(self, get):
+        if isinstance(self.reg, Expression):
+            self.reg = self.reg.replace(get)
+        return self
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        if isinstance(self.reg, Expression):
+            self.reg.traverse(get)
 
 
 class Statement:
@@ -297,8 +317,8 @@ class AssignStatement(Statement):
         self.reg = reg
         self.expr = expr
         self.isconst = not isinstance(expr, Expression)
-    def __repr__(self):
-        return f"{self.reg} = {self.expr!r}"
+    def __repr__(self, pad=""):
+        return f"{pad}{self.reg} = {self.expr!r}"
     def uses(self, add):
         if isinstance(self.expr, Expression):
             self.expr.uses(add)
@@ -319,8 +339,8 @@ class SetItemStatement(Statement):
         self.obj = obj
         self.index = index
         self.value = value
-    def __repr__(self):
-        return f"{self.obj!r}[{self.index!r}] = {self.value!r}"
+    def __repr__(self, pad=""):
+        return f"{pad}{self.obj!r}[{self.index!r}] = {self.value!r}"
     def uses(self, add):
         for part in (self.obj, self.index, self.value):
             if isinstance(part, Expression):
@@ -339,18 +359,18 @@ class SetItemStatement(Statement):
                 part.traverse(get)
 
 class HaltStatement(Statement):
-    def __repr__(self):
-        return "HALT"
+    def __repr__(self, pad=""):
+        return f"{pad}HALT"
 
 class ReturnStatement(Statement):
     def __init__(self, reg: Expression|Const, closure: RegArray):
         self.reg = reg
         self.closure = closure
         self.dcm = {}  # default_const_map
-    def __repr__(self):
+    def __repr__(self, pad=""):
         if isinstance(self.dcm.get(self.reg), Undefined):
-            return f"return  // closure: {sorted(self.closure)}"
-        return f"return {self.reg}  // closure: {sorted(self.closure)}"
+            return f"{pad}return  // closure: {sorted(self.closure)}"
+        return f"{pad}return {self.reg}  // closure: {sorted(self.closure)}"
     def uses(self, add):
         if isinstance(self.reg, Expression):
             self.reg.uses(add)
@@ -371,28 +391,142 @@ class ReturnStatement(Statement):
 class GotoStatement(Statement):
     def __init__(self, target):
         self.target = target
-    def __repr__(self):
-        return f"goto {self.target}"
+    def __repr__(self, pad=""):
+        return f"{pad}goto {self.target}"
 
 class CondStatement(Statement):
     def __init__(self, target, condition: Expression|Const, fall):
-        self.cond = condition
         self.target = target
+        self.cond = condition
         self.fall = fall
-    def __repr__(self):
-        return f"goto {self.target} if {self.cond} else {self.fall}"
+    def __repr__(self, pad=""):
+        return f"{pad}goto {self.target} if {self.cond} else {self.fall}"
     def uses(self, add):
         if isinstance(self.cond, Expression):
             self.cond.uses(add)
     def replace(self, get):
         if isinstance(self.cond, Expression):
             self.cond = self.cond.replace(get)
+        return self
     def traverse(self, get):
         Statement.traverse(self, get)
         if isinstance(self.cond, Expression):
             self.cond.traverse(get)
 
 JumpStatement = GotoStatement | CondStatement
+
+
+class IfStatement(Statement):
+    def __init__(self, condition: Expression|Const, then_stmts: list[Statement], else_stmts: list[Statement]|None = None):
+        self.cond = condition
+        self.then_stmts = then_stmts
+        self.else_stmts = else_stmts or ()
+    def __repr__(self, pad=""):
+        next_pad = pad + "  "
+        then_stmts, else_stmts = self.then_stmts, self.else_stmts
+        buffer = StringIO()
+        write = buffer.write
+        write(f"{pad}if ({self.cond!r})")
+        if not then_stmts:
+            write(" {}")
+            if else_stmts:
+                write(f"\n{pad}else")
+        elif len(then_stmts) == 1:
+            write(f"\n{then_stmts[0].__repr__(pad=next_pad)}")
+            if else_stmts:
+                write(f"\n{pad}else")
+        else:
+            write(" {\n")
+            for stmt in then_stmts:
+                write(f"{stmt.__repr__(pad=next_pad)}\n")
+            write(f"{pad}}}")
+            if else_stmts:
+                write(" else")
+        if else_stmts:
+            if len(else_stmts) == 1:
+                write(f"\n{else_stmts[0].__repr__(pad=next_pad)}")
+            else:
+                write(" {\n")
+                for stmt in else_stmts:
+                    write(f"{stmt.__repr__(pad=next_pad)}\n")
+                write(f"{pad}}}")
+        return buffer.getvalue()
+    def uses(self, add):
+        if isinstance(self.cond, Expression):
+            self.cond.uses(add)
+        for stmt in self.then_stmts:
+            stmt.uses(add)
+        if self.else_stmts:
+            for stmt in self.else_stmts:
+                stmt.uses(add)
+    def replace(self, get):
+        if isinstance(self.cond, Expression):
+            self.cond = self.cond.replace(get)
+        for stmt in self.then_stmts:
+            stmt.replace(get)
+        if self.else_stmts:
+            for stmt in self.else_stmts:
+                stmt.replace(get)
+        return self
+    def traverse(self, get):
+        Statement.traverse(self, get)
+        if isinstance(self.cond, Expression):
+            self.cond.traverse(get)
+        for stmt in self.then_stmts:
+            stmt.traverse(get)
+        if self.else_stmts:
+            for stmt in self.else_stmts:
+                stmt.traverse(get)
+
+class WhileStatement(Statement):
+    def __init__(self, cond: Expression, body: list[Statement]):
+        self.cond = cond
+        self.body = body
+    def __repr__(self, pad=""):
+        next_pad = pad + "  "
+        body = self.body
+        buffer = StringIO()
+        write = buffer.write
+        write(f"{pad}while ({self.cond!r})")
+        if not body:
+            write(" {}")
+        elif len(body) == 1:
+            write(f"\n{body[0].__repr__(pad=next_pad)}")
+        else:
+            write(" {\n")
+            for stmt in body:
+                write(f"{stmt.__repr__(pad=next_pad)}\n")
+            write(f"{pad}}}")
+        return buffer.getvalue()
+    def uses(self, add):
+        if isinstance(self.cond, Expression):
+            self.cond.uses(add)
+        for stmt in self.body:
+            stmt.uses(add)
+    def replace(self, get):
+        if isinstance(self.cond, Expression):
+            self.cond = self.cond.replace(get)
+        for stmt in self.body:
+            stmt.replace(get)
+        return self
+    def traverse(self, get):
+        Statement.traverse(self, get)
+        if isinstance(self.cond, Expression):
+            self.cond.traverse(get)
+        for stmt in self.body:
+            stmt.traverse(get)
+
+
+def check_printers():
+    for i in range(3):
+        for j in range(3):
+            print()
+            print(IfStatement(123, [HaltStatement()] * i, [HaltStatement()] * j).__repr__(pad=f"{i}{j}  "))
+    for i in range(3):
+        print()
+        print(WhileStatement(123, [HaltStatement()] * i).__repr__(pad=f"{i} "))
+    exit()
+# check_printers()
 
 
 def getByte():
@@ -454,14 +588,17 @@ def bb2str(bb, insts):
     buffer = StringIO()
     write = buffer.write
     write(f"~~~ {bb}\n")
+    pad = "  "
     for inst in insts:
-        write(f"  {inst}\n")
+        write(f"{inst.__repr__(pad=pad)}\n")
     return buffer.getvalue()
 def print_cfg(FF, DF_LV=None):
     blocks, preds, succs, calls = FF
     if DF_LV is not None:
         GEN, KILL, IN, OUT = DF_LV
     for bb, insts in blocks.items():
+        if SKIP_BLOCKS_WITH_CFG and not preds[bb] and not succs[bb]:
+            continue
         if DF_LV is not None:
           # print("GEN:", mask2regs(GEN[bb]))
           # print("KILL:", mask2regs(KILL[bb]))
@@ -712,14 +849,24 @@ class Block:
         self.id = id
     def __repr__(self):
         return f"BB{self.id}"
+    def __eq__(self, right):
+        return isinstance(right, Block) and self.id == right.id
+    def __hash__(self):
+        return hash(self.id)
+    def __lt__(self, right):
+        if isinstance(right, Block):
+            return self.id < right.id
+        return NotImplemented
 
 def make_cfg(blocks):
     succs = {bb: set() for bb in blocks}
     calls = {bb: set() for bb in blocks}
+    def call_traverse(node):
+        calls[node.goto].add(bb)
+    traverse = {call_type: call_traverse for call_type in CallExpression.__args__}.get
     for bb, insts in blocks.items():
         for inst in insts:
-            if isinstance(inst.expr, CallExpression):
-                calls[inst.expr.goto].add(bb)
+            inst.traverse(traverse)
         term_inst = insts[-1]
         if isinstance(term_inst, JumpStatement):
             succs[bb].add(term_inst.target)
@@ -731,6 +878,21 @@ def make_cfg(blocks):
         for succ in bb_succ:
             preds[succ].append(bb)
     return blocks, preds, succs, calls
+
+def check_cfg(FF):
+    blocks, old_preds, old_succs, old_calls = FF
+    _, preds, succs, calls = make_cfg(blocks)
+    errors = []
+    for bb in blocks:
+        if sorted(old_preds[bb]) != sorted(preds[bb]):
+            errors.append(f"preds[{bb}]:\n    actual: {old_preds[bb]}\n    expected: {preds[bb]}")
+        if old_succs[bb] != succs[bb]:
+            errors.append(f"succs[{bb}]:\n    actual: {old_succs[bb]}\n    expected: {succs[bb]}")
+        if old_calls[bb] != calls[bb]:
+            errors.append(f"calls[{bb}]:\n    actual: {old_calls[bb]}\n    expected: {calls[bb]}")
+    print(*errors, sep='\n')
+    if errors:
+        exit()
 
 def clean_insts(insts):
     try: pos = insts.index(None)
@@ -882,8 +1044,196 @@ def MethodCallDeapply(FF):
         for inst in insts:
             inst.traverse(traverse)
 
+SKIP_BLOCKS_WITH_CFG = True
+
+def common_join_cfg(bb, end, fixFF):
+    preds, succs, calls, call_dsts = fixFF
+    for succ_bb in succs[end]:
+        preds[succ_bb] = [bb if pred_bb == end else pred_bb for pred_bb in preds[succ_bb]]
+
+    succs[bb] = succs[end]
+
+    for call_bb in call_dsts[end]:
+        calls[call_bb].discard(end)
+        calls[call_bb].add(bb)
+        call_dsts[bb].add(call_bb)
+
+    del preds[end], succs[end], calls[end]
+
+def join_cfg(bb, middle, end, fixFF):
+    preds, succs, calls, call_dsts = fixFF
+    for succ_bb in succs[end]:
+        preds[succ_bb] = [bb if pred_bb == end else pred_bb for pred_bb in preds[succ_bb]]
+
+    succs[bb] = succs[end]
+
+    for call_bb in (call_dsts[middle] | call_dsts[end]):
+        calls[call_bb].discard(middle)
+        calls[call_bb].discard(end)
+        calls[call_bb].add(bb)
+        call_dsts[bb].add(call_bb)
+
+    del preds[middle], succs[middle], calls[middle], preds[end], succs[end], calls[end]
+
 def StructureReconstruction(FF):  # CFG2AST
-    pass  # TODO
+    blocks, preds, succs, calls = FF
+
+    call_dsts = {bb: set() for bb in blocks}
+    for dst, sources in calls.items():
+        for src in sources:
+            call_dsts[src].add(dst)
+    fixFF = preds, succs, calls, call_dsts
+
+    def update(bb):
+        queue.extend(preds[bb])
+        queue.append(bb)
+        queue.extend(succs[bb])
+
+    def analyze(bb, id):
+        if bb.id == id:
+            print(bb2str(bb, insts))
+            print(bb2str(target, blocks[target]))
+            print(bb2str(fall, blocks[fall]))
+          # print(succs[target] == {bb}, set(preds[target]) == {bb}, set(preds[fall]) == {bb})
+
+    queue = deque(blocks)
+    while queue:
+        bb = queue.popleft()
+        try: insts = blocks[bb]
+        except KeyError: continue
+        term_inst = insts[-1]
+        if isinstance(term_inst, CondStatement):
+            target = term_inst.target
+            fall = term_inst.fall
+            if succs[target] == {fall} and set(preds[target]) == {bb} and set(preds[fall]) == {bb, target}:
+                # bb -> target -> fall
+                #   \            ^
+                #    \----------/
+                assert not calls[target] and not calls[fall]
+                # blocks
+                cond = insts.pop().cond
+                then_stmts = blocks.pop(target)
+                then_stmt = then_stmts.pop()
+                assert isinstance(then_stmt, GotoStatement) and then_stmt.target == fall
+                insts.append(IfStatement(cond, then_stmts))
+                insts.extend(blocks.pop(fall))
+                # CFG
+                join_cfg(bb, target, fall, fixFF)
+                update(bb)
+            elif succs[fall] == {target} and set(preds[fall]) == {bb} and set(preds[target]) == {bb, fall}:
+                # bb -> fall -> target
+                #   \          ^
+                #    \--------/
+                assert not calls[fall] and not calls[target]
+                # blocks
+                cond = insts.pop().cond
+                then_stmts = blocks.pop(fall)
+                then_stmt = then_stmts.pop()
+                assert isinstance(then_stmt, GotoStatement) and then_stmt.target == target
+                insts.append(IfStatement(InverseReg(cond), then_stmts))
+                insts.extend(blocks.pop(target))
+                # CFG
+                join_cfg(bb, fall, target, fixFF)
+                update(bb)
+            elif not succs[target] and set(preds[target]) == {bb} and set(preds[fall]) == {bb}:
+                # bb -> target -> return
+                #   \-> fall
+                # bb;
+                assert not calls[target] and not calls[fall]
+                # blocks
+                cond = insts.pop().cond
+                then_stmts = blocks.pop(target)
+                assert isinstance(then_stmts[-1], ReturnStatement)
+                insts.append(IfStatement(cond, then_stmts))
+                insts.extend(blocks.pop(fall))
+                # CFG
+                join_cfg(bb, target, fall, fixFF)
+                update(bb)
+            elif not succs[fall] and set(preds[fall]) == {bb} and set(preds[target]) == {bb}:
+                # bb -> fall -> return
+                #   \-> target
+                # bb;
+                assert not calls[fall] and not calls[target]
+                # blocks
+                cond = insts.pop().cond
+                then_stmts = blocks.pop(fall)
+                assert isinstance(then_stmts[-1], ReturnStatement)
+                insts.append(IfStatement(InverseReg(cond), then_stmts))
+                insts.extend(blocks.pop(target))
+                # CFG
+                join_cfg(bb, fall, target, fixFF)
+                update(bb)
+            elif succs[target] == {bb} and set(preds[target]) == {bb} and set(preds[fall]) == {bb}:
+                #   /-> fall
+                # bb -> target
+                #  ^          \
+                #   \---------/
+                assert not calls[target] and not calls[fall]
+                # blocks
+                cond = insts.pop().cond
+                body_stmts = blocks.pop(target)
+                body_stmt = body_stmts.pop()
+                assert isinstance(body_stmt, GotoStatement) and body_stmt.target == bb
+                insts.append(WhileStatement(cond, body_stmts))
+                insts.extend(blocks.pop(fall))
+                # CFG
+                join_cfg(bb, target, fall, fixFF)
+                preds[bb].remove(target)
+                update(bb)
+            elif succs[fall] == {bb} and set(preds[fall]) == {bb} and set(preds[target]) == {bb}:
+                raise RuntimeError("unchecked!")
+                #   /-> target
+                # bb -> fall
+                #  ^        \
+                #   \-------/
+                assert not calls[fall] and not calls[target]
+                # blocks
+                cond = insts.pop().cond
+                body_stmts = blocks.pop(fall)
+                body_stmt = body_stmts.pop()
+                assert isinstance(body_stmt, GotoStatement) and body_stmt.target == bb
+                insts.append(WhileStatement(InverseReg(cond), body_stmts))
+                insts.extend(blocks.pop(target))
+                # CFG
+                join_cfg(bb, fall, target, fixFF)
+                preds[bb].remove(fall)
+                update(bb)
+        elif isinstance(term_inst, GotoStatement):
+            target = term_inst.target
+            if set(preds[target]) == {bb}:
+                # bb -> target
+                assert not calls[target]
+                # blocks
+                insts.pop()
+                insts.extend(blocks.pop(target))
+                # CFG
+                common_join_cfg(bb, target, fixFF)
+                update(bb)
+            elif len(insts) == 1:
+                # preds -> bb (single goto) -> target
+                for pred in preds[bb]:
+                    pred_term = blocks[pred][-1]
+                    if not isinstance(pred_term, CondStatement):
+                        raise RuntimeError("CondStatement in StructureReconstruction(preds -> bb (single goto) -> target) temporary not supported...")
+                    assert not calls[bb]
+                    # blocks
+                    p_target = pred_term.target
+                    p_fall = pred_term.fall
+                    if p_target == bb:
+                        pred_term.target = target
+                    if p_fall == bb:
+                        pred_term.fall = target
+                  # print(p_target, p_fall, bb, target)
+                    # CFG
+                    succs[pred].discard(bb)
+                    succs[pred].add(target)
+                    queue.append(pred)
+                preds[target].remove(bb)
+                preds[target].extend(preds[bb])
+                update(bb)
+                del blocks[bb], preds[bb], succs[bb], calls[bb]
+                check_cfg(FF)
+    check_cfg(FF)
 
 
 def call_blocks(insts):
@@ -991,7 +1341,7 @@ def stage2(gotos):
     MethodCallDeapply(FF)
     StructureReconstruction(FF)
   # DF_LV = LiveVariables(FF)
-    print_cfg(FF, DF_LV)
+    print_cfg(FF) #, DF_LV)
 
 
 def main():
