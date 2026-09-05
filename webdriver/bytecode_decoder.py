@@ -42,7 +42,11 @@ reg_names[253] = "(void 0)"
 reg_names[254] = "c1"  # constant 1
 reg_names[255] = "c0"  # constant 0
 
+type Const = str | int | float
+
 class Expression:
+    def replace(self, get):
+        return self
     def evaluate(self):
         """Returns either None or {"value": evaluated}."""
         pass
@@ -179,30 +183,6 @@ class RegCall(Expression):
             self.this.traverse(get)
         self.args.traverse(get)
 
-class RegSetItem(Expression):
-    def __init__(self, obj, index, value):
-        self.obj = obj
-        self.index = index
-        self.value = value
-    def __repr__(self):
-        return f"{self.obj!r}[{self.index!r}] = {self.value!r}"
-    def uses(self, add):
-        for part in (self.obj, self.index, self.value):
-            if isinstance(part, Expression):
-                part.uses(add)
-    def replace(self, get):
-        for attr in ('obj', 'index', 'value'):
-            part = getattr(self, attr)
-            if isinstance(part, Expression):
-                setattr(self, attr, part.replace(get))
-        return self
-    def traverse(self, get):
-        Expression.traverse(self, get)
-        for attr in ('obj', 'index', 'value'):
-            part = getattr(self, attr)
-            if isinstance(part, Expression):
-                part.traverse(get)
-
 class BinOp(Expression):
     _evaluator = {
         '==': lambda L, R: L == R,
@@ -271,28 +251,6 @@ class LambdaDef(Expression):
         Expression.traverse(self, get)
         self.args.traverse(get)
 
-class ReturnReg(Expression):
-    def __init__(self, reg, closure):
-        self.reg = reg
-        self.closure = closure  # RegArray
-    def __repr__(self):
-        return f"return {self.reg}  // closure: {sorted(self.closure)}"
-    def uses(self, add):
-        if isinstance(self.reg, Expression):
-            self.reg.uses(add)
-    def uses_fd(self, add):
-        if isinstance(self.reg, Expression):
-            self.reg.uses(add)
-        self.closure.uses(add)
-    def replace(self, get):
-        if isinstance(self.reg, Expression):
-            self.reg = self.reg.replace(get)
-    def traverse(self, get):
-        Expression.traverse(self, get)
-        if isinstance(self.reg, Expression):
-            self.reg.traverse(get)
-        self.closure.traverse(get)
-
 class CallDef(Expression):
     def __init__(self, goto, dsts: tuple[Expression], srcs: list[Expression]):
         self.goto = goto
@@ -316,6 +274,125 @@ class CallDef(Expression):
         for src in self.srcs:
             if isinstance(src, Expression):
                 src.traverse(get)
+
+CallExpression = CallDef | LambdaDef
+
+
+class Statement:
+    isconst = False
+    expr = None
+    def uses(self, add):
+        pass
+    def replace(self, get):
+        return self
+    def evaluate(self):
+        pass
+    def traverse(self, get):
+        visitor = get(type(self))
+        if visitor:
+            visitor(self)
+
+class AssignStatement(Statement):
+    def __init__(self, reg: Reg, expr: Expression|Const):
+        self.reg = reg
+        self.expr = expr
+        self.isconst = not isinstance(expr, Expression)
+    def __repr__(self):
+        return f"{self.reg} = {self.expr!r}"
+    def uses(self, add):
+        if isinstance(self.expr, Expression):
+            self.expr.uses(add)
+    def replace(self, get):
+        if isinstance(self.expr, Expression):
+            self.expr = self.expr.replace(get)
+        return self
+    def evaluate(self):
+        if isinstance(self.expr, Expression):
+            return self.expr.evaluate()
+    def traverse(self, get):
+        Statement.traverse(self, get)
+        if isinstance(self.expr, Expression):
+            self.expr.traverse(get)
+
+class SetItemStatement(Statement):
+    def __init__(self, obj: Expression|Const, index, value):
+        self.obj = obj
+        self.index = index
+        self.value = value
+    def __repr__(self):
+        return f"{self.obj!r}[{self.index!r}] = {self.value!r}"
+    def uses(self, add):
+        for part in (self.obj, self.index, self.value):
+            if isinstance(part, Expression):
+                part.uses(add)
+    def replace(self, get):
+        for attr in ('obj', 'index', 'value'):
+            part = getattr(self, attr)
+            if isinstance(part, Expression):
+                setattr(self, attr, part.replace(get))
+        return self
+    def traverse(self, get):
+        Statement.traverse(self, get)
+        for attr in ('obj', 'index', 'value'):
+            part = getattr(self, attr)
+            if isinstance(part, Expression):
+                part.traverse(get)
+
+class HaltStatement(Statement):
+    def __repr__(self):
+        return "HALT"
+
+class ReturnStatement(Statement):
+    def __init__(self, reg: Expression|Const, closure: RegArray):
+        self.reg = reg
+        self.closure = closure
+        self.dcm = {}  # default_const_map
+    def __repr__(self):
+        if isinstance(self.dcm.get(self.reg), Undefined):
+            return f"return  // closure: {sorted(self.closure)}"
+        return f"return {self.reg}  // closure: {sorted(self.closure)}"
+    def uses(self, add):
+        if isinstance(self.reg, Expression):
+            self.reg.uses(add)
+    def uses_fd(self, add):
+        if isinstance(self.reg, Expression):
+            self.reg.uses(add)
+        self.closure.uses(add)
+    def replace(self, get):
+        if isinstance(self.reg, Expression):
+            self.reg = self.reg.replace(get)
+        return self
+    def traverse(self, get):
+        Statement.traverse(self, get)
+        if isinstance(self.reg, Expression):
+            self.reg.traverse(get)
+        self.closure.traverse(get)
+
+class GotoStatement(Statement):
+    def __init__(self, target):
+        self.target = target
+    def __repr__(self):
+        return f"goto {self.target}"
+
+class CondStatement(Statement):
+    def __init__(self, target, condition: Expression|Const, fall):
+        self.cond = condition
+        self.target = target
+        self.fall = fall
+    def __repr__(self):
+        return f"goto {self.target} if {self.cond} else {self.fall}"
+    def uses(self, add):
+        if isinstance(self.cond, Expression):
+            self.cond.uses(add)
+    def replace(self, get):
+        if isinstance(self.cond, Expression):
+            self.cond = self.cond.replace(get)
+    def traverse(self, get):
+        Statement.traverse(self, get)
+        if isinstance(self.cond, Expression):
+            self.cond.traverse(get)
+
+JumpStatement = GotoStatement | CondStatement
 
 
 def getByte():
@@ -362,18 +439,6 @@ def Caesar(shift, right, left):
 # exit()
 
 
-HAS_LHS = [False] * 256
-for kind in (1, 5, 10, 11, 13, 15, 20, 50, 100):
-    HAS_LHS[kind] = True
-HAS_USES = {
-     5: 2, 10: 2, 11: 2, 13: 2,
-    14: 1, 15: 2, 17: 2, 21: 1,
-    50: 2, 100: 2,
-}
-
-HAS_LHS = tuple(HAS_LHS)
-HAS_USES = tuple(HAS_USES.get(i) for i in range(256))
-
 def print_op_14(write, inst):
     """Not used. This is just a concept/pseudocode, i.e., what actually happens in the VM."""
     _, return_reg = inst
@@ -385,37 +450,12 @@ def print_op_14(write, inst):
     write("      if len(reg_backups) == 0: mod_regs.clear()\n")
     write("      regs = _regs\n")
 
-print_dispatch = [None] * 256
-print_dispatch[  1] = lambda write, inst: write(f"  c | {inst[1]} = {repr(inst[2]) if isinstance(inst[2], str) else inst[2]}\n")
-print_dispatch[  5] = lambda write, inst: write(f"  5 | {inst[1]} = {inst[2]}\n")
-print_dispatch[ 10] = lambda write, inst: write(f" 10 | {inst[1]} = {inst[2]}\n")
-print_dispatch[ 11] = lambda write, inst: write(f" 11 | {inst[1]} = {inst[2]}\n")
-print_dispatch[ 13] = lambda write, inst: write(f" 13 | {inst[1]} = {inst[2]}\n")
-print_dispatch[ 14] = lambda write, inst: write(f" 14 | {inst[1]}\n")  # print_op_14
-print_dispatch[ 15] = lambda write, inst: write(f" 15 | {inst[1]} = {inst[2]}\n")
-print_dispatch[ 16] = lambda write, inst: write( " 16 | HALT\n")
-print_dispatch[ 17] = lambda write, inst: write(f" 17 | goto {inst[1]} if {inst[2]} else {inst[3]}\n")
-print_dispatch[ 18] = lambda write, inst: write(f" 18 | goto {inst[1]}\n")
-print_dispatch[ 20] = lambda write, inst: write(f" 20 | {inst[1]} = {inst[2]}\n")
-print_dispatch[ 21] = lambda write, inst: write(f" 21 | {inst[1]}\n")
-print_dispatch[ 50] = lambda write, inst: write(f" 5_ | {inst[1]} = {inst[2]}\n")
-print_dispatch[100] = lambda write, inst: write(f"10_ | {inst[1]} = {inst[2]}\n")
-
-def inst2str(inst):
-    if inst is None:
-        return "None\n"
-    buffer = StringIO()
-    print_dispatch[inst[0]](buffer.write, inst)
-    return buffer.getvalue()[:-1]
 def bb2str(bb, insts):
     buffer = StringIO()
     write = buffer.write
     write(f"~~~ {bb}\n")
     for inst in insts:
-        if inst is not None:
-            print_dispatch[inst[0]](write, inst)  
-        else:
-            write("      None\n")
+        write(f"  {inst}\n")
     return buffer.getvalue()
 def print_cfg(FF, DF_LV=None):
     blocks, preds, succs, calls = FF
@@ -436,34 +476,34 @@ EOB = True  # end of block
 def op_1(add):
     reg = getReg()
     str = loadString()
-    add((1, reg, str))  # {reg} = {str!r}
+    add(AssignStatement(reg, str))  # {reg} = {str!r}
     return 0
 def op_2(add):
     reg = getReg()
     num = getByte()
-    add((1, reg, num))  # {reg} = {num}
+    add(AssignStatement(reg, num))  # {reg} = {num}
     return 0
 def op_3(add):
     reg = getReg()
     num = loadFloat()
-    add((1, reg, num))  # {reg} = {num}
+    add(AssignStatement(reg, num))  # {reg} = {num}
     return 0
 def op_4(add):
     reg = getReg()
     num = loadLongNum()
-    add((1, reg, num))  # {reg} = {num}
+    add(AssignStatement(reg, num))  # {reg} = {num}
     return 0
 def op_5(add):
     reg = getReg()
     arr = loadRegistersArray()
-    add((5, reg, arr))  # {reg} = {arr}
+    add(AssignStatement(reg, arr))  # {reg} = {arr}
     return 0
 
 def op_10(add):
     set_reg = getReg()
     arr_reg = getReg()
     idx_reg = getReg()
-    add((10, set_reg, RegIndex(arr_reg, idx_reg)))  # {set_reg} = {arr_reg}[{idx_reg}]]
+    add(AssignStatement(set_reg, RegIndex(arr_reg, idx_reg)))  # {set_reg} = {arr_reg}[{idx_reg}]]
     return 0
 
 def op_11(add):
@@ -472,7 +512,7 @@ def op_11(add):
     this_reg = getReg()
     args = loadRegistersArray()
     # {set_reg} = {func_reg}.apply({this_reg}, {args})
-    add((11, set_reg, RegCall(func_reg, this_reg, args)))
+    add(AssignStatement(set_reg, RegCall(func_reg, this_reg, args)))
     return 0
 
 # 12 - eval
@@ -484,43 +524,43 @@ def op_13(add):
     assert len(regs) % 2 == 0
     dsts = tuple(regs[i]  for i in range(0, len(regs), 2))
     srcs = list(regs[i+1] for i in range(0, len(regs), 2))
-    add([13, ret_reg, CallDef(goto, dsts, srcs)])  # {ret_reg} = call {goto} ({args})
+    add(AssignStatement(ret_reg, CallDef(goto, dsts, srcs)))  # {ret_reg} = call {goto} ({args})
     queue.append(goto)
     return 0
 
 def op_14(add):
     ret_reg = getReg()
     closure = loadRegistersArray()
-    add((14, ReturnReg(ret_reg, closure)))  # return <ret_reg>  // closure: <closure>
+    add(ReturnStatement(ret_reg, closure))  # return <ret_reg>  // closure: <closure>
     return EOB
 
 def op_15(add):
     dst = getReg()
     src = getReg()
-    add((15, dst, src))  # {dst} = {src}
+    add(AssignStatement(dst, src))  # {dst} = {src}
     return 0
 
 def op_16(add):
-    add((16,))  # HALT
+    add(HaltStatement())  # HALT
     return EOB
 def op_17(add):
     reg = getReg()
     goto = loadLongNum()
     queue.append(pos)
     queue.append(goto)
-    add([17, goto, reg, pos])  # goto {goto} if {reg} else {pos}
+    add(CondStatement(goto, reg, pos))  # goto {goto} if {reg} else {pos}
     return EOB
 def op_18(add):
     goto = loadLongNum()
     queue.append(goto)
-    add([18, goto])  # goto {goto}
+    add(GotoStatement(goto))  # goto {goto}
     return EOB
 def op_19(add):
     reg = getReg()
     goto = loadLongNum()
     queue.append(pos)
     queue.append(goto)
-    add([17, pos, reg, goto])  # goto {pos} if {reg} else {goto}
+    add(CondStatement(pos, reg, goto))  # goto {pos} if {reg} else {goto}
     return EOB
 
 def op_20(add):
@@ -528,14 +568,14 @@ def op_20(add):
     goto = loadLongNum()
     args = loadRegistersArray()
     queue.append(goto)
-    add([20, reg, LambdaDef(goto, args)])
+    add(AssignStatement(reg, LambdaDef(goto, args)))
     return 0
 
 def op_21(add):
     arr_reg = getReg()
     idx_reg = getReg()
     val_reg = getReg()
-    add((21, RegSetItem(arr_reg, idx_reg, val_reg)))  # {arr_reg}[{idx_reg}] = {val_reg}
+    add(SetItemStatement(arr_reg, idx_reg, val_reg))  # {arr_reg}[{idx_reg}] = {val_reg}
     return 0
 
 # 22 - catch
@@ -545,74 +585,74 @@ def op_50(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((50, reg, BinOp(L, "==", R)))
+    add(AssignStatement(reg, BinOp(L, "==", R)))
     return 0
 def op_51(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((50, reg, BinOp(L, "!=", R)))
+    add(AssignStatement(reg, BinOp(L, "!=", R)))
     return 0
 def op_52(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((50, reg, BinOp(L, "===", R)))
+    add(AssignStatement(reg, BinOp(L, "===", R)))
     return 0
 def op_53(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((50, reg, BinOp(L, "!==", R)))
+    add(AssignStatement(reg, BinOp(L, "!==", R)))
     return 0
 def op_54(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((50, reg, BinOp(L, '<', R)))
+    add(AssignStatement(reg, BinOp(L, '<', R)))
     return 0
 def op_55(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((50, reg, BinOp(L, '>', R)))
+    add(AssignStatement(reg, BinOp(L, '>', R)))
     return 0
 def op_56(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((50, reg, BinOp(L, "<=", R)))
+    add(AssignStatement(reg, BinOp(L, "<=", R)))
     return 0
 def op_57(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((50, reg, BinOp(L, ">=", R)))
+    add(AssignStatement(reg, BinOp(L, ">=", R)))
     return 0
 
 def op_100(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((100, reg, BinOp(L, '+', R)))
+    add(AssignStatement(reg, BinOp(L, '+', R)))
     return 0
 def op_101(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((100, reg, BinOp(L, '*', R)))
+    add(AssignStatement(reg, BinOp(L, '*', R)))
     return 0
 def op_102(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((100, reg, BinOp(L, '-', R)))
+    add(AssignStatement(reg, BinOp(L, '-', R)))
     return 0
 def op_103(add):
     reg = getReg()
     L = getReg()
     R = getReg()
-    add((100, reg, BinOp(L, '/', R)))
+    add(AssignStatement(reg, BinOp(L, '/', R)))
     return 0
 
 
@@ -678,15 +718,13 @@ def make_cfg(blocks):
     calls = {bb: set() for bb in blocks}
     for bb, insts in blocks.items():
         for inst in insts:
-            kind = inst[0]
-            if kind in (13, 20):
-                calls[inst[2].goto].add(bb)
+            if isinstance(inst.expr, CallExpression):
+                calls[inst.expr.goto].add(bb)
         term_inst = insts[-1]
-        kind = term_inst[0]
-        if kind in (17, 18):
-            succs[bb].add(term_inst[1])
-            if kind == 17:
-                succs[bb].add(term_inst[3])
+        if isinstance(term_inst, JumpStatement):
+            succs[bb].add(term_inst.target)
+            if isinstance(term_inst, CondStatement):
+                succs[bb].add(term_inst.fall)
 
     preds = {bb: [] for bb in blocks}
     for bb, bb_succ in succs.items():
@@ -711,13 +749,17 @@ def check_users(FF):
     users = set(); add = users.add
     for insts in blocks.values():
         for inst in insts:
-            if HAS_LHS[inst[0]]:
-                add(inst[1])
-    unused_regs = set(str(reg) for reg in _regbase if reg not in users)
+            if isinstance(inst, AssignStatement):
+                add(inst.reg)
+    const_regs = set(str(reg) for reg in _regbase if reg not in users)
     defaults = {"c0": 0, "c1": 1, "(void 0)": Undefined(), "null": Null()}
-    default_const_map = {_name2reg[k]: v for k, v in defaults.items() if k in unused_regs}
-    print("\nunused regs:", unused_regs)
+    default_const_map = {_name2reg[k]: v for k, v in defaults.items() if k in const_regs}
+    print("\nconst regs:", const_regs)
     print("default const map:", default_const_map)
+    for insts in blocks.values():
+        term_inst = insts[-1]
+        if isinstance(term_inst, ReturnStatement):
+            term_inst.dcm = default_const_map
     return default_const_map
 
 
@@ -731,17 +773,14 @@ def LiveVariables(FF):
     for bb, insts in blocks.items():
         gen = kill = 0
         for inst in insts:
-            kind = inst[0]
-            if HAS_LHS[kind]:
-                kill |= _id2shift[inst[1].id]
-            idx = HAS_USES[kind]
-            if idx is not None:
-                uses = set()
-                (inst[idx].uses_fd if kind == 14 else inst[idx].uses)(uses.add)
-                for reg in uses:
-                    shift = _id2shift[reg.id]
-                    if not kill & shift:
-                        gen |= shift
+            if isinstance(inst, AssignStatement):
+                kill |= _id2shift[inst.reg.id]
+            uses = set()
+            (inst.uses_fd if isinstance(inst, ReturnStatement) else inst.uses)(uses.add)
+            for reg in uses:
+                shift = _id2shift[reg.id]
+                if not kill & shift:
+                    gen |= shift
         GEN[bb] = gen
         KILL[bb] = kill
         _KILL[bb] = ~kill & TOP
@@ -772,21 +811,17 @@ def ConstantPropogationAndFolding(FF, DF_LV, default_const_map):
         out = OUT[bb]
         const_map = default_const_map.copy()
         for i, inst in enumerate(insts):
-            kind = inst[0]
-            if kind == 1:  # <reg> = <const>
-                const_map[inst[1]] = inst[2]
-                if not (out & _id2shift[inst[1].id]):
+            if inst.isconst:  # <reg> = <const>
+                const_map[inst.reg] = inst.expr
+                if not (out & _id2shift[inst.reg.id]):
                     insts[i] = None
-            else:
-                idx = HAS_USES[kind]
-                if idx is not None:
-                    inst[idx].replace(const_map.get)
-                if kind in (11, 100):
-                    result = inst[2].evaluate()
-                    if result is not None:
-                        const_map[inst[1]] = result["value"]
-                        if not (out & _id2shift[inst[1].id]):
-                            insts[i] = None
+                continue
+            inst.replace(const_map.get)
+            result = inst.evaluate()
+            if result is not None:
+                const_map[inst.reg] = result["value"]
+                if not (out & _id2shift[inst.reg.id]):
+                    insts[i] = None
         if const_map:
             clean_insts(insts)
 
@@ -799,37 +834,31 @@ def ForwardSubstitution(FF, DF_LV):
     for bb, insts in blocks.items():
         counter = defaultdict(int)
         for inst in insts:
-            idx = HAS_USES[inst[0]]
-            if idx is not None:
-                inst[idx].uses(add)
+            inst.uses(add)
         for name in mask2regs(OUT[bb]):
             counter[name] += 1
 
         need_clean = False
         for i, inst in enumerate(insts):
             prev_i = i - 1
-            if prev_i < 0 or not HAS_LHS[insts[prev_i][0]]:
-                continue
-            kind = inst[0]
-            idx = HAS_USES[kind]
-            if idx is None:
+            if prev_i < 0 or not isinstance(insts[prev_i], AssignStatement):
                 continue
             uses = []
-            inst[idx].uses(uses.append)
-            prev_inst = insts[prev_i]
+            inst.uses(uses.append)
+            prev_inst: AssignStatement = insts[prev_i]
             replaces = {}
             for reg in reversed(uses):
-                if isinstance(reg, Reg) and counter[reg] == 1 and reg == prev_inst[1]:
-                    replaces[reg] = prev_inst[2]
+                if isinstance(reg, Reg) and counter[reg] == 1 and reg == prev_inst.reg:
+                    replaces[reg] = prev_inst.expr
                     insts[prev_i] = None
                     prev_i -= 1
                     while prev_i >= 0 and insts[prev_i] is None:
                         prev_i -= 1
-                    if prev_i < 0 or not HAS_LHS[insts[prev_i][0]]:
+                    if prev_i < 0 or not isinstance(insts[prev_i], AssignStatement):
                         break
                     prev_inst = insts[prev_i]
             if replaces:
-                inst[idx].replace(replaces.get)
+                inst.replace(replaces.get)
                 need_clean = True
         if need_clean:
             clean_insts(insts)
@@ -851,17 +880,17 @@ def MethodCallDeapply(FF):
     traverse = {RegCall: reg_call_traverse}.get
     for insts in blocks.values():
         for inst in insts:
-            idx = HAS_USES[inst[0]]
-            if idx is not None:
-                inst[idx].traverse(traverse)
+            inst.traverse(traverse)
+
+def StructureReconstruction(FF):  # CFG2AST
+    pass  # TODO
 
 
 def call_blocks(insts):
     result = set()
     for inst in insts:
-        kind = inst[0]
-        if kind in (13, 20):
-            result.add(inst[2].goto)
+        if isinstance(inst.expr, CallExpression):
+            result.add(inst.expr.goto)
     return result
 
 RED    = "\33[91m"
@@ -914,10 +943,9 @@ def get_cycles(FF):
             all_calls |= calls[bb]
         print(all_calls, "->", print_colored_set(cycle, blocks, calls))
         for bb in cycle:
-            insts = blocks[bb]
-            term_inst = insts[-1]
-            if term_inst[0] == 14:  # return
-                print(" ", inst2str(term_inst))
+            term_inst = blocks[bb][-1]
+            if isinstance(term_inst, ReturnStatement):
+                print(" ", term_inst)
 
 
 def stage2(gotos):
@@ -934,7 +962,7 @@ def stage2(gotos):
     for i in range(len(gotos) - 1):
         start_pos = pos = gotos[i]
         end_pos = gotos[i+1]
-        insts = []
+        insts = blocks[goto2bb[start_pos]] = []
         add = insts.append
         while pos < end_pos:
             kind = getByte()
@@ -942,19 +970,17 @@ def stage2(gotos):
             if pos < end_pos:
                 assert not eob
         for inst in insts:
-            kind = inst[0]
-            if kind in (13, 20):
-                inst[2].goto = goto2bb[inst[2].goto]
+            expr = inst.expr
+            if isinstance(expr, CallDef|LambdaDef):
+                expr.goto = goto2bb[expr.goto]
         if not eob:
-            add([18, pos])  # goto {pos}
+            add(GotoStatement(pos))  # goto {pos}
 
         term_inst = insts[-1]
-        kind = term_inst[0]
-        if kind in (17, 18):
-            term_inst[1] = goto2bb[term_inst[1]]
-            if kind == 17:
-                term_inst[3] = goto2bb[term_inst[3]]
-        blocks[goto2bb[start_pos]] = insts
+        if isinstance(term_inst, JumpStatement):
+            term_inst.target = goto2bb[term_inst.target]
+            if isinstance(term_inst, CondStatement):
+                term_inst.fall = goto2bb[term_inst.fall]
 
     FF = make_cfg(blocks)
     dcm = check_users(FF)  # default_const_map
@@ -963,7 +989,8 @@ def stage2(gotos):
     ConstantPropogationAndFolding(FF, DF_LV, dcm)
     ForwardSubstitution(FF, DF_LV)
     MethodCallDeapply(FF)
-    DF_LV = LiveVariables(FF)
+    StructureReconstruction(FF)
+  # DF_LV = LiveVariables(FF)
     print_cfg(FF, DF_LV)
 
 
