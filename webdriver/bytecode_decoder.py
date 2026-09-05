@@ -58,6 +58,10 @@ class Reg(Expression):
         return isinstance(value, Reg) and self.id == value.id
     def __hash__(self):
         return hash(self.id)
+    def __lt__(self, value):
+        if isinstance(value, Reg):
+            return self.id < value.id
+        return NotImplemented
     def uses(self, add):
         add(self)
     def replace(self, get):
@@ -103,9 +107,6 @@ class RegArray(Expression):
         for item in self.items:
             if isinstance(item, Expression):
                 item.uses(add)
-    def expandleft(self, item):
-        self.items = (item, *self.items)
-        return self
     def replace(self, get):
         new_items = tuple(
             item.replace(get) if isinstance(item, Expression) else item
@@ -200,20 +201,61 @@ class BinOp(Expression):
 class LambdaDef(Expression):
     def __init__(self, goto, args):
         self.goto = goto
-        self.args = args
-    def __repr__(self):
+        self.args = args  # RegArray
+    def __repr__old__(self):
+        """Not used. This is just a concept/pseudocode, i.e., what actually happens in the VM."""
         buffer = StringIO()
         write = buffer.write
         write("function() {\n")
         if self.args:
-            write(f"  {str(self.args)[1:-1]} = arguments\n")
+            write(f"        {str(self.args)[1:-1]} = arguments\n")
         write(f"        reg_backups.push([regs[:], {_regbase[201]!r})\n")
         write(f"        call {self.goto} while !{_regbase[201]}\n")
         write(f"        return (delete {_regbase[201]})\n")
         write("      }")
         return buffer.getvalue()
+    def __repr__(self):
+        if self.args:
+            return f"lambda *a: call {self.goto} ({self.args} = a)"
+        return f"lambda: call {self.goto} ()"
     def uses(self, add):
         pass
+
+class ReturnReg(Expression):
+    def __init__(self, reg, closure):
+        self.reg = reg
+        self.closure = closure  # RegArray
+    def __repr__(self):
+        return f"return {self.reg}  // closure: {sorted(self.closure)}"
+    def uses(self, add):
+        if isinstance(self.reg, Expression):
+            self.reg.uses(add)
+    def uses_fd(self, add):
+        if isinstance(self.reg, Expression):
+            self.reg.uses(add)
+        self.closure.uses(add)
+    def replace(self, get):
+        if isinstance(self.reg, Expression):
+            self.reg = self.reg.replace(get)
+
+class CallDef(Expression):
+    def __init__(self, goto, dsts: tuple[Expression], srcs: list[Expression]):
+        self.goto = goto
+        self.dsts = dsts
+        self.srcs = srcs
+        assert len(dsts) == len(srcs)
+    def __repr__(self):
+        args = ", ".join(f'{dst} = {src}' for dst, src in zip(self.dsts, self.srcs))
+        return f"call {self.goto} ({args})"
+    def uses(self, add):
+        for src in self.srcs:
+            if isinstance(src, Expression):
+                src.uses(add)
+    def replace(self, get):
+        srcs = self.srcs
+        for i, src in enumerate(srcs):
+            if isinstance(src, Expression):
+                srcs[i] = src.replace(get)
 
 
 def getByte():
@@ -261,42 +303,41 @@ def Caesar(shift, right, left):
 
 
 HAS_LHS = [False] * 256
-for kind in (1, 5, 10, 11, 15, 20, 30, 31, 50, 100):
+for kind in (1, 5, 10, 11, 13, 15, 20, 50, 100):
     HAS_LHS[kind] = True
 HAS_USES = {
-    5: 2, 10: 2, 11: 2, 14: 1,
-    15: 2, 17: 2, 21: 1,
-    30: 2, 50: 2, 100: 2,
+     5: 2, 10: 2, 11: 2, 13: 2,
+    14: 1, 15: 2, 17: 2, 21: 1,
+    50: 2, 100: 2,
 }
 
 HAS_LHS = tuple(HAS_LHS)
 HAS_USES = tuple(HAS_USES.get(i) for i in range(256))
+
+def print_op_14(write, inst):
+    """Not used. This is just a concept/pseudocode, i.e., what actually happens in the VM."""
+    _, return_reg = inst
+    write(" 14 | _regs, ret_reg = reg_backups.pop()\n")
+    write(f"      _regs[ret_reg] = {return_reg.reg}\n")
+    if return_reg.closure:
+        write(f"      mod_regs |= {set(return_reg.closure)}\n")
+    write("      _regs[mod_regs] = regs[mod_regs]\n")
+    write("      if len(reg_backups) == 0: mod_regs.clear()\n")
+    write("      regs = _regs\n")
 
 print_dispatch = [None] * 256
 print_dispatch[  1] = lambda write, inst: write(f"  c | {inst[1]} = {repr(inst[2]) if isinstance(inst[2], str) else inst[2]}\n")
 print_dispatch[  5] = lambda write, inst: write(f"  5 | {inst[1]} = {inst[2]}\n")
 print_dispatch[ 10] = lambda write, inst: write(f" 10 | {inst[1]} = {inst[2]}\n")
 print_dispatch[ 11] = lambda write, inst: write(f" 11 | {inst[1]} = {inst[2]}\n")
-print_dispatch[ 13] = lambda write, inst: write(f" 13 | reg_backups.push([regs[:], ...])\n")
-def print_op_14(write, inst):
-    _, regs = inst
-    result_reg = regs.items[0]
-    write(" 14 | _regs, ret_reg = reg_backups.pop()\n")
-    write(f"      _regs[ret_reg] = {result_reg}\n")
-    if regs:
-        write(f"      mod_regs |= {set(regs.items[1:])}\n")
-    write("      _regs[mod_regs] = regs[mod_regs]\n")
-    write("      if len(reg_backups) == 0: mod_regs.clear()\n")
-    write("      regs = _regs\n")
-print_dispatch[ 14] = print_op_14
+print_dispatch[ 13] = lambda write, inst: write(f" 13 | {inst[1]} = {inst[2]}\n")
+print_dispatch[ 14] = lambda write, inst: write(f" 14 | {inst[1]}\n")  # print_op_14
 print_dispatch[ 15] = lambda write, inst: write(f" 15 | {inst[1]} = {inst[2]}\n")
 print_dispatch[ 16] = lambda write, inst: write( " 16 | HALT\n")
 print_dispatch[ 17] = lambda write, inst: write(f" 17 | goto {inst[1]} if {inst[2]} else {inst[3]}\n")
 print_dispatch[ 18] = lambda write, inst: write(f" 18 | goto {inst[1]}\n")
 print_dispatch[ 20] = lambda write, inst: write(f" 20 | {inst[1]} = {inst[2]}\n")
 print_dispatch[ 21] = lambda write, inst: write(f" 21 | {inst[1]}\n")
-print_dispatch[ 30] = lambda write, inst: write(f"      {inst[1]} = {inst[2]}\n")  # from op_13
-print_dispatch[ 31] = lambda write, inst: write(f"      {inst[1]} = call {inst[2]}\n")  # from op_13
 print_dispatch[ 50] = lambda write, inst: write(f" 5_ | {inst[1]} = {inst[2]}\n")
 print_dispatch[100] = lambda write, inst: write(f"10_ | {inst[1]} = {inst[2]}\n")
 
@@ -305,7 +346,7 @@ def inst2str(inst):
         return "None\n"
     buffer = StringIO()
     print_dispatch[inst[0]](buffer.write, inst)
-    return buffer.getvalue()
+    return buffer.getvalue()[:-1]
 def bb2str(bb, insts):
     buffer = StringIO()
     write = buffer.write
@@ -381,17 +422,16 @@ def op_13(add):
     ret_reg = getReg()
     regs = loadRegistersArray()
     assert len(regs) % 2 == 0
-    add((13,))  # push
-    for i in range(0, len(regs), 2):
-        add((30, regs[i], regs[i+1]))  # {dst} = {src}
-    add([31, ret_reg, goto])  # {ret_reg} = call {goto}
+    dsts = tuple(regs[i]  for i in range(0, len(regs), 2))
+    srcs = list(regs[i+1] for i in range(0, len(regs), 2))
+    add([13, ret_reg, CallDef(goto, dsts, srcs)])  # {ret_reg} = call {goto} ({args})
     queue.append(goto)
     return 0
 
 def op_14(add):
-    result_reg = getReg()
-    regs = loadRegistersArray().expandleft(result_reg)
-    add((14, regs))  # return
+    ret_reg = getReg()
+    closure = loadRegistersArray()
+    add((14, ReturnReg(ret_reg, closure)))  # return <ret_reg>  // closure: <closure>
     return EOB
 
 def op_15(add):
@@ -579,10 +619,8 @@ def make_cfg(blocks):
     for bb, insts in blocks.items():
         for inst in insts:
             kind = inst[0]
-            if kind == 20:
+            if kind in (13, 20):
                 calls[inst[2].goto].add(bb)
-            elif kind == 31:
-                calls[inst[2]].add(bb)
         term_inst = insts[-1]
         kind = term_inst[0]
         if kind in (17, 18):
@@ -639,7 +677,7 @@ def LiveVariables(FF):
             idx = HAS_USES[kind]
             if idx is not None:
                 uses = set()
-                inst[idx].uses(uses.add)
+                (inst[idx].uses_fd if kind == 14 else inst[idx].uses)(uses.add)
                 for reg in uses:
                     shift = _id2shift[reg.id]
                     if not kill & shift:
@@ -712,7 +750,8 @@ def ForwardSubstitution(FF, DF_LV):
             prev_i = i - 1
             if prev_i < 0 or not HAS_LHS[insts[prev_i][0]]:
                 continue
-            idx = HAS_USES[inst[0]]
+            kind = inst[0]
+            idx = HAS_USES[kind]
             if idx is None:
                 continue
             uses = []
@@ -740,8 +779,8 @@ def call_blocks(insts):
     result = set()
     for inst in insts:
         kind = inst[0]
-        if kind in (20, 31):
-            result.add(inst[2])
+        if kind in (13, 20):
+            result.add(inst[2].goto)
     return result
 
 RED    = "\33[91m"
@@ -793,6 +832,11 @@ def get_cycles(FF):
         for bb in cycle:
             all_calls |= calls[bb]
         print(all_calls, "->", print_colored_set(cycle, blocks, calls))
+        for bb in cycle:
+            insts = blocks[bb]
+            term_inst = insts[-1]
+            if term_inst[0] == 14:  # return
+                print(" ", inst2str(term_inst))
 
 
 def stage2(gotos):
@@ -818,10 +862,8 @@ def stage2(gotos):
                 assert not eob
         for inst in insts:
             kind = inst[0]
-            if kind == 20:
+            if kind in (13, 20):
                 inst[2].goto = goto2bb[inst[2].goto]
-            elif kind == 31:
-                inst[2] = goto2bb[inst[2]]
         if not eob:
             add([18, pos])  # goto {pos}
 
@@ -831,8 +873,6 @@ def stage2(gotos):
             term_inst[1] = goto2bb[term_inst[1]]
             if kind == 17:
                 term_inst[3] = goto2bb[term_inst[3]]
-        elif kind == 20:
-            term_inst[2].goto = goto2bb[term_inst[2].goto]
         blocks[goto2bb[start_pos]] = insts
 
     FF = make_cfg(blocks)
