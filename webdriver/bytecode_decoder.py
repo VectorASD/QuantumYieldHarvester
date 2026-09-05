@@ -1,6 +1,6 @@
 from base64 import b64decode
 from struct import unpack
-from collections import deque
+from collections import deque, defaultdict
 from pathlib import Path
 import re
 from io import StringIO
@@ -55,7 +55,7 @@ class Reg(Expression):
         name = reg_names[id]
         return f"reg{id}" if name is None else name
     def __eq__(self, value):
-        return isinstance(value, Reg) and self.id == value
+        return isinstance(value, Reg) and self.id == value.id
     def __hash__(self):
         return hash(self.id)
     def uses(self, add):
@@ -197,6 +197,24 @@ class BinOp(Expression):
         if isinstance(self.left, int) and isinstance(self.right, int):
             return {"value": BinOp._evaluator[self.op](self.left, self.right)}
 
+class LambdaDef(Expression):
+    def __init__(self, goto, args):
+        self.goto = goto
+        self.args = args
+    def __repr__(self):
+        buffer = StringIO()
+        write = buffer.write
+        write("function() {\n")
+        if self.args:
+            write(f"  {str(self.args)[1:-1]} = arguments\n")
+        write(f"        reg_backups.push([regs[:], {_regbase[201]!r})\n")
+        write(f"        call {self.goto} while !{_regbase[201]}\n")
+        write(f"        return (delete {_regbase[201]})\n")
+        write("      }")
+        return buffer.getvalue()
+    def uses(self, add):
+        pass
+
 
 def getByte():
     global pos
@@ -243,7 +261,7 @@ def Caesar(shift, right, left):
 
 
 HAS_LHS = [False] * 256
-for kind in (1, 5, 10, 11, 15, 30, 31, 50, 100):
+for kind in (1, 5, 10, 11, 15, 20, 30, 31, 50, 100):
     HAS_LHS[kind] = True
 HAS_USES = {
     5: 2, 10: 2, 11: 2, 14: 1,
@@ -275,16 +293,7 @@ print_dispatch[ 15] = lambda write, inst: write(f" 15 | {inst[1]} = {inst[2]}\n"
 print_dispatch[ 16] = lambda write, inst: write( " 16 | HALT\n")
 print_dispatch[ 17] = lambda write, inst: write(f" 17 | goto {inst[1]} if {inst[2]} else {inst[3]}\n")
 print_dispatch[ 18] = lambda write, inst: write(f" 18 | goto {inst[1]}\n")
-def print_op_20(write, inst):
-    _, reg, goto, args = inst
-    write(f" 20 | {reg} = function() {{\n")
-    if args:
-        write(f"  {str(args)[1:-1]} = arguments\n")
-    write(f"        reg_backups.push([regs[:], {_regbase[201]!r})\n")
-    write(f"        call {goto} while !{_regbase[201]}\n")
-    write(f"        return (delete {_regbase[201]})\n")
-    write("      }\n")
-print_dispatch[ 20] = print_op_20
+print_dispatch[ 20] = lambda write, inst: write(f" 20 | {inst[1]} = {inst[2]}\n")
 print_dispatch[ 21] = lambda write, inst: write(f" 21 | {inst[1]}\n")
 print_dispatch[ 30] = lambda write, inst: write(f"      {inst[1]} = {inst[2]}\n")  # from op_13
 print_dispatch[ 31] = lambda write, inst: write(f"      {inst[1]} = call {inst[2]}\n")  # from op_13
@@ -292,6 +301,8 @@ print_dispatch[ 50] = lambda write, inst: write(f" 5_ | {inst[1]} = {inst[2]}\n"
 print_dispatch[100] = lambda write, inst: write(f"10_ | {inst[1]} = {inst[2]}\n")
 
 def inst2str(inst):
+    if inst is None:
+        return "None\n"
     buffer = StringIO()
     print_dispatch[inst[0]](buffer.write, inst)
     return buffer.getvalue()
@@ -300,7 +311,10 @@ def bb2str(bb, insts):
     write = buffer.write
     write(f"~~~ {bb}\n")
     for inst in insts:
-        print_dispatch[inst[0]](write, inst)  
+        if inst is not None:
+            print_dispatch[inst[0]](write, inst)  
+        else:
+            write("      None\n")
     return buffer.getvalue()
 def print_cfg(FF, DF_LV=None):
     blocks, preds, succs, calls = FF
@@ -414,7 +428,7 @@ def op_20(add):
     goto = loadLongNum()
     args = loadRegistersArray()
     queue.append(goto)
-    add([20, reg, goto, args])
+    add([20, reg, LambdaDef(goto, args)])
     return 0
 
 def op_21(add):
@@ -554,10 +568,10 @@ def stage1(start_pos=0):
 
 
 class Block:
-    def __init__(self, name):
-        self.name = name
+    def __init__(self, id):
+        self.id = id
     def __repr__(self):
-        return f"BB{self.name}"
+        return f"BB{self.id}"
 
 def make_cfg(blocks):
     succs = {bb: set() for bb in blocks}
@@ -565,7 +579,9 @@ def make_cfg(blocks):
     for bb, insts in blocks.items():
         for inst in insts:
             kind = inst[0]
-            if kind in (20, 31):
+            if kind == 20:
+                calls[inst[2].goto].add(bb)
+            elif kind == 31:
                 calls[inst[2]].add(bb)
         term_inst = insts[-1]
         kind = term_inst[0]
@@ -573,8 +589,6 @@ def make_cfg(blocks):
             succs[bb].add(term_inst[1])
             if kind == 17:
                 succs[bb].add(term_inst[3])
-        elif kind == 20:
-            succs[bb].add(term_inst[2])
 
     preds = {bb: [] for bb in blocks}
     for bb, bb_succ in succs.items():
@@ -653,10 +667,9 @@ def LiveVariables(FF):
 
     return GEN, KILL, IN, OUT
 
-def ConstantPropogationAndFolding(FF, DF_LV):
+def ConstantPropogationAndFolding(FF, DF_LV, default_const_map):
     blocks = FF[0]
     OUT = DF_LV[3]
-    default_const_map = check_users(FF)
     for bb, insts in blocks.items():
         out = OUT[bb]
         const_map = default_const_map.copy()
@@ -677,6 +690,49 @@ def ConstantPropogationAndFolding(FF, DF_LV):
                         if not (out & _id2shift[inst[1].id]):
                             insts[i] = None
         if const_map:
+            clean_insts(insts)
+
+def ForwardSubstitution(FF, DF_LV):
+    """Do not call a second time, otherwise we will with `100% probability` break the original execution order of instructions!"""
+    blocks = FF[0]
+    OUT = DF_LV[3]
+    def add(name):
+        counter[name] += 1
+    for bb, insts in blocks.items():
+        counter = defaultdict(int)
+        for inst in insts:
+            idx = HAS_USES[inst[0]]
+            if idx is not None:
+                inst[idx].uses(add)
+        for name in mask2regs(OUT[bb]):
+            counter[name] += 1
+
+        need_clean = False
+        for i, inst in enumerate(insts):
+            prev_i = i - 1
+            if prev_i < 0 or not HAS_LHS[insts[prev_i][0]]:
+                continue
+            idx = HAS_USES[inst[0]]
+            if idx is None:
+                continue
+            uses = []
+            inst[idx].uses(uses.append)
+            prev_inst = insts[prev_i]
+            replaces = {}
+            for reg in reversed(uses):
+                if isinstance(reg, Reg) and counter[reg] == 1 and reg == prev_inst[1]:
+                    replaces[reg] = prev_inst[2]
+                    insts[prev_i] = None
+                    prev_i -= 1
+                    while prev_i >= 0 and insts[prev_i] is None:
+                        prev_i -= 1
+                    if prev_i < 0 or not HAS_LHS[insts[prev_i][0]]:
+                        break
+                    prev_inst = insts[prev_i]
+            if replaces:
+                inst[idx].replace(replaces.get)
+                need_clean = True
+        if need_clean:
             clean_insts(insts)
 
 
@@ -762,7 +818,9 @@ def stage2(gotos):
                 assert not eob
         for inst in insts:
             kind = inst[0]
-            if kind in (20, 31):
+            if kind == 20:
+                inst[2].goto = goto2bb[inst[2].goto]
+            elif kind == 31:
                 inst[2] = goto2bb[inst[2]]
         if not eob:
             add([18, pos])  # goto {pos}
@@ -774,13 +832,15 @@ def stage2(gotos):
             if kind == 17:
                 term_inst[3] = goto2bb[term_inst[3]]
         elif kind == 20:
-            term_inst[2] = goto2bb[term_inst[2]]
+            term_inst[2].goto = goto2bb[term_inst[2].goto]
         blocks[goto2bb[start_pos]] = insts
 
     FF = make_cfg(blocks)
+    dcm = check_users(FF)  # default_const_map
     get_cycles(FF)
     DF_LV = LiveVariables(FF)
-    ConstantPropogationAndFolding(FF, DF_LV)
+    ConstantPropogationAndFolding(FF, DF_LV, dcm)
+    ForwardSubstitution(FF, DF_LV)
     DF_LV = LiveVariables(FF)
     print_cfg(FF, DF_LV)
 
