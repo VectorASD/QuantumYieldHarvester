@@ -46,6 +46,12 @@ class Expression:
     def evaluate(self):
         """Returns either None or {"value": evaluated}."""
         pass
+    def traverse(self, get):
+        visitor = get(type(self))
+        if visitor:
+            visitor(self)
+    def chain(self):
+        pass
 
 class Reg(Expression):
     def __init__(self, id):
@@ -66,6 +72,8 @@ class Reg(Expression):
         add(self)
     def replace(self, get):
         return get(self, self)
+    def chain(self):
+        return self
 _regbase = tuple(Reg(id) for id in range(256))
 _name2reg = {name: _regbase[id] for id, name in enumerate(reg_names) if name is not None}
 
@@ -90,6 +98,19 @@ class RegIndex(Expression):
         if isinstance(self.index, Expression):
             self.index = self.index.replace(get)
         return self
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        if isinstance(self.reg, Expression):
+            self.reg.traverse(get)
+        if isinstance(self.index, Expression):
+            self.index.traverse(get)
+    def chain(self):
+        reg = self.reg.chain() if isinstance(self.reg, Expression) else self.reg
+        index = self.index.chain() if isinstance(self.index, Expression) else self.index
+        if reg is not None and index is not None:
+            if isinstance(reg, tuple):
+                return (*reg, index)
+            return (reg, index)
 
 class RegArray(Expression):
     def __init__(self, items):
@@ -114,6 +135,11 @@ class RegArray(Expression):
         )
         self.items = new_items
         return self
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        for item in self.items:
+            if isinstance(item, Expression):
+                item.traverse(get)
 
 class RegCall(Expression):
     def __init__(self, func, this, args):
@@ -121,7 +147,9 @@ class RegCall(Expression):
         self.this = this
         self.args = args  # RegArray
     def __repr__(self):
-        return f"{self.func!r}.apply({self.this!r}, {self.args!r})"
+        if self.this is None:
+            return f"{self.func}({str(self.args)[1:-1]})"
+        return f"{self.func!r}.apply({self.this!r}, {self.args})"
     def uses(self, add):
         if isinstance(self.func, Expression):
             self.func.uses(add)
@@ -143,6 +171,13 @@ class RegCall(Expression):
             assert len(args) == 3
             assert isinstance(args[0], int)
             return {"value": Caesar(*args)}
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        if isinstance(self.func, Expression):
+            self.func.traverse(get)
+        if isinstance(self.this, Expression):
+            self.this.traverse(get)
+        self.args.traverse(get)
 
 class RegSetItem(Expression):
     def __init__(self, obj, index, value):
@@ -161,6 +196,12 @@ class RegSetItem(Expression):
             if isinstance(part, Expression):
                 setattr(self, attr, part.replace(get))
         return self
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        for attr in ('obj', 'index', 'value'):
+            part = getattr(self, attr)
+            if isinstance(part, Expression):
+                part.traverse(get)
 
 class BinOp(Expression):
     _evaluator = {
@@ -197,6 +238,12 @@ class BinOp(Expression):
     def evaluate(self):
         if isinstance(self.left, int) and isinstance(self.right, int):
             return {"value": BinOp._evaluator[self.op](self.left, self.right)}
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        if isinstance(self.left, Expression):
+            self.left.traverse(get)
+        if isinstance(self.right, Expression):
+            self.right.traverse(get)
 
 class LambdaDef(Expression):
     def __init__(self, goto, args):
@@ -220,6 +267,9 @@ class LambdaDef(Expression):
         return f"lambda: call {self.goto} ()"
     def uses(self, add):
         pass
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        self.args.traverse(get)
 
 class ReturnReg(Expression):
     def __init__(self, reg, closure):
@@ -237,6 +287,11 @@ class ReturnReg(Expression):
     def replace(self, get):
         if isinstance(self.reg, Expression):
             self.reg = self.reg.replace(get)
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        if isinstance(self.reg, Expression):
+            self.reg.traverse(get)
+        self.closure.traverse(get)
 
 class CallDef(Expression):
     def __init__(self, goto, dsts: tuple[Expression], srcs: list[Expression]):
@@ -256,6 +311,11 @@ class CallDef(Expression):
         for i, src in enumerate(srcs):
             if isinstance(src, Expression):
                 srcs[i] = src.replace(get)
+    def traverse(self, get):
+        Expression.traverse(self, get)
+        for src in self.srcs:
+            if isinstance(src, Expression):
+                src.traverse(get)
 
 
 def getByte():
@@ -774,6 +834,27 @@ def ForwardSubstitution(FF, DF_LV):
         if need_clean:
             clean_insts(insts)
 
+def MethodCallDeapply(FF):
+    blocks = FF[0]
+    def reg_call_traverse(node):
+        func = node.func
+        if isinstance(func, RegIndex):
+            this = node.this.chain() if isinstance(node.this, Expression) else node.this
+            if func.reg.chain() == this:
+                # example: (window, 'navigator', 'storage') == (window, 'navigator', 'storage')
+                node.this = None
+            else:
+                # Unusual property of this VM's compiler: the sufficiency of just one property isinstance(func, RegIndex).
+                # If this ever happens, it will indicate a change in the compiler.
+                # Ideally, in this branch reg_call_traverse should do nothing at all! :)
+                raise RuntimeError("MethodCallDeapply: undefined behavior")
+    traverse = {RegCall: reg_call_traverse}.get
+    for insts in blocks.values():
+        for inst in insts:
+            idx = HAS_USES[inst[0]]
+            if idx is not None:
+                inst[idx].traverse(traverse)
+
 
 def call_blocks(insts):
     result = set()
@@ -881,6 +962,7 @@ def stage2(gotos):
     DF_LV = LiveVariables(FF)
     ConstantPropogationAndFolding(FF, DF_LV, dcm)
     ForwardSubstitution(FF, DF_LV)
+    MethodCallDeapply(FF)
     DF_LV = LiveVariables(FF)
     print_cfg(FF, DF_LV)
 
