@@ -202,6 +202,7 @@ class BinOp(Expression):
         self.left = left
         self.op = op
         self.right = right
+        self.isarith = op in ('+', '-', '*', '/')
     def __repr__(self):
         return f"{self.left!r} {self.op} {self.right!r}"
     def uses(self, add):
@@ -318,7 +319,12 @@ class AssignStatement(Statement):
         self.expr = expr
         self.isconst = not isinstance(expr, Expression)
     def __repr__(self, pad=""):
-        return f"{pad}{self.reg} = {self.expr!r}"
+        expr = self.expr
+        if isinstance(expr, BinOp) and expr.isarith and expr.left == self.reg:
+            if expr.right == 1 and expr.op in ('+', '-'):
+                return f"{pad}{self.reg}{expr.op}{expr.op}"  # ++, --
+            return f"{pad}{self.reg} {expr.op}= {expr.right!r}"  # +=, -=, *=, /=
+        return f"{pad}{self.reg} = {expr!r}"
     def uses(self, add):
         if isinstance(self.expr, Expression):
             self.expr.uses(add)
@@ -479,7 +485,7 @@ class IfStatement(Statement):
                 stmt.traverse(get)
 
 class WhileStatement(Statement):
-    def __init__(self, cond: Expression, body: list[Statement]):
+    def __init__(self, cond: Expression|Const, body: list[Statement]):
         self.cond = cond
         self.body = body
     def __repr__(self, pad=""):
@@ -516,6 +522,48 @@ class WhileStatement(Statement):
         for stmt in self.body:
             stmt.traverse(get)
 
+class DoWhileStatement(Statement):
+    def __init__(self, cond: Expression|Const, body: list[Statement]):
+        self.cond = cond
+        self.body = body
+    def __repr__(self, pad=""):
+        next_pad = pad + "  "
+        body = self.body
+        buffer = StringIO()
+        write = buffer.write
+        write(f"{pad}do")
+        if not body:
+            write(" {}\n")
+            write(pad)
+        elif len(body) == 1:
+            write(f"\n{body[0].__repr__(pad=next_pad)}\n")
+            write(pad)
+        else:
+            write(" {\n")
+            for stmt in body:
+                write(f"{stmt.__repr__(pad=next_pad)}\n")
+            write(pad)
+            write("} ")
+        write(f"while ({self.cond!r})")
+        return buffer.getvalue()
+    def uses(self, add):
+        if isinstance(self.cond, Expression):
+            self.cond.uses(add)
+        for stmt in self.body:
+            stmt.uses(add)
+    def replace(self, get):
+        if isinstance(self.cond, Expression):
+            self.cond = self.cond.replace(get)
+        for stmt in self.body:
+            stmt.replace(get)
+        return self
+    def traverse(self, get):
+        Statement.traverse(self, get)
+        if isinstance(self.cond, Expression):
+            self.cond.traverse(get)
+        for stmt in self.body:
+            stmt.traverse(get)
+
 
 def check_printers():
     for i in range(3):
@@ -525,6 +573,9 @@ def check_printers():
     for i in range(3):
         print()
         print(WhileStatement(123, [HaltStatement()] * i).__repr__(pad=f"{i} "))
+    for i in range(3):
+        print()
+        print(DoWhileStatement(123, [HaltStatement()] * i).__repr__(pad=f"{i} "))
     exit()
 # check_printers()
 
@@ -1075,6 +1126,42 @@ def join_cfg(bb, middle, end, fixFF):
 
     del preds[middle], succs[middle], calls[middle], preds[end], succs[end], calls[end]
 
+def delete_term(FF, bb):
+    blocks, preds, succs, calls = FF
+    term = blocks[bb].pop()
+    if isinstance(term, GotoStatement):
+        succs[bb].remove(term.target)
+        preds[term.target].remove(bb)
+    elif isinstance(term, CondStatement):
+        for target in (term.target, term.fall):
+            succs[bb].remove(target)
+            preds[target].remove(bb)
+    else:
+        raise RuntimeError(f"delete_term: unsupported {type(term).__name__!r}")
+
+def add_term(FF, bb, term):
+    blocks, preds, succs, calls = FF
+    blocks[bb].append(term)
+    if isinstance(term, CondStatement):
+        for target in (term.target, term.fall):
+            succs[bb].add(target)
+            preds[target].append(bb)
+    else:
+        raise RuntimeError(f"add_term: unsupported {type(term).__name__!r}")
+
+def replace_term(FF, bb, term):
+    delete_term(FF, bb)
+    add_term(FF, bb, term)
+
+def delete_block(FF, bb):
+    blocks, preds, succs, calls = FF
+    if preds[bb] or calls[bb]:
+        raise RuntimeError(f"can't delete this {bb}: preds={preds[bb]}, calls={calls[bb]}")
+    delete_term(FF, bb)
+    if succs[bb]:
+        raise RuntimeError(f"Removing terminator don't release of {bb}: succs={succs[bb]}")
+    del blocks[bb], preds[bb], succs[bb], calls[bb]
+
 def StructureReconstruction(FF):  # CFG2AST
     blocks, preds, succs, calls = FF
 
@@ -1105,6 +1192,8 @@ def StructureReconstruction(FF):  # CFG2AST
         if isinstance(term_inst, CondStatement):
             target = term_inst.target
             fall = term_inst.fall
+            if target == fall:
+                raise RuntimeError("unchecked behavior")
             if succs[target] == {fall} and set(preds[target]) == {bb} and set(preds[fall]) == {bb, target}:
                 # bb -> target -> fall
                 #   \            ^
@@ -1198,6 +1287,29 @@ def StructureReconstruction(FF):  # CFG2AST
                 join_cfg(bb, fall, target, fixFF)
                 preds[bb].remove(fall)
                 update(bb)
+            elif target == bb and set(preds[fall]) == {bb}:
+                # bb -\-> fall
+                #  ^  |
+                #  \--/
+                # blocks
+                cond = insts.pop().cond
+                blocks[bb] = [DoWhileStatement(cond, insts), *blocks.pop(fall)]
+                # CFG
+                succs[bb].remove(bb)
+                preds[bb].remove(bb)
+                common_join_cfg(bb, fall, fixFF)
+                update(bb)
+            elif len(insts) == 1:
+                # preds -> bb (single cond) -> target
+                #                          \-> fall
+                update(bb)
+                term = insts[-1]
+                for pred in preds[bb]:
+                    pred_term = blocks[pred][-1]
+                    if isinstance(pred_term, GotoStatement):
+                        replace_term(FF, pred, term)
+                if not preds[bb] and not calls[bb]:
+                    delete_block(FF, bb)
         elif isinstance(term_inst, GotoStatement):
             target = term_inst.target
             if set(preds[target]) == {bb}:
@@ -1208,6 +1320,15 @@ def StructureReconstruction(FF):  # CFG2AST
                 insts.extend(blocks.pop(target))
                 # CFG
                 common_join_cfg(bb, target, fixFF)
+                update(bb)
+            elif target == bb:
+                # bb -> bb
+                # blocks
+                insts.pop()
+                blocks[bb] = [WhileStatement(1, insts)]
+                # CFG
+                succs[bb].remove(bb)
+                preds[bb].remove(bb)
                 update(bb)
             elif len(insts) == 1:
                 # preds -> bb (single goto) -> target
