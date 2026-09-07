@@ -1357,6 +1357,135 @@ def StructureReconstruction(FF):  # CFG2AST
     check_cfg(FF)
 
 
+class Pattern:
+    def __init__(self, name):
+        self.name = name
+    def __repr__(self):
+        return f"Pattern({self.name!r})"
+matcher_tree = {
+    "cond": {
+        (None, None): (
+            1, 2, 1, None, {
+                # 0 -> 1 -> 2
+                #  \       ^
+                #   \-----/
+                "goto": {
+                    2: (None, None, {1: (0,), 2: (0, 1)}, Pattern("if {}")),  # 37 matches
+                },
+                'x': (2, {
+                    # 0 -> 2 -> 1
+                    #  \       ^
+                    #   \-----/
+                    "goto": {
+                        1: (None, None, {2: (0,), 1: (0, 2)}, Pattern("if !{}")),  # 13 matches
+                    }
+                }),
+            }
+        )
+    }
+}
+def match_bb(FF, bb):
+    blocks, preds, succs, calls = FF
+    node = matcher_tree
+    check_bb = bb
+
+    bb2id = {bb: 0}
+    id2bb = {0: bb}
+    default_stack = []
+
+    def check_defaults():
+        nonlocal check_bb, node
+        if default_stack:
+            check_bb, node = default_stack.pop()
+            assert check_bb in id2bb
+            check_bb = id2bb[check_bb]
+            return True
+        return False
+
+    def check_preds(preds_tree):
+        for bb_id, preds_ids in preds_tree.items():
+            bb = id2bb[bb_id]
+            bb_preds = preds[bb]
+            if sorted(bb_preds) != sorted(id2bb[id] for id in preds_ids):
+                return True  # use defaults
+        return False
+
+    while True:
+        term = blocks[check_bb][-1]
+        term_kind = ("cond" if isinstance(term, CondStatement) else
+                     "goto" if isinstance(term, GotoStatement) else
+                     "return" if isinstance(term, ReturnStatement | HaltStatement) else
+                     None)
+        if term_kind is None:
+            raise RuntimeError(f"Is not terminator: {type(term).__name__}, op: {term}")
+
+        branch = node.get(term_kind)
+        default = node.get('x')
+        if default is not None:
+            default_stack.append(default)
+
+        if branch is None:
+            if check_defaults():
+                continue
+            print("unknown branch")
+            break
+        if isinstance(term, CondStatement):
+            check = bb2id.get(term.target), bb2id.get(term.fall)
+        elif isinstance(term, GotoStatement):
+            check = bb2id.get(term.target)
+        else:
+            1/0
+        sign = branch.get(check)
+        if sign is None:
+            if check_defaults():
+                continue
+            print("unknown sign")
+            break
+
+        if isinstance(term, CondStatement):
+            target_id, fall_id, check_bb, preds_tree, node = sign
+            if target_id is not None:
+                bb2id[term.target] = target_id
+                id2bb[target_id] = term.target
+            if fall_id is not None:
+                bb2id[term.fall] = fall_id
+                id2bb[fall_id] = term.fall
+        elif isinstance(term, GotoStatement):
+            target_id, check_bb, preds_tree, node = sign
+            if target_id is not None:
+                bb2id[term.target] = target_id
+                id2bb[target_id] = term.target
+        else:
+            1/0
+
+        if check_bb is not None:
+            check_bb = id2bb[check_bb]
+        if preds_tree is not None and check_preds(preds_tree):
+            print("checking error")
+            if check_defaults():
+                continue
+            break
+
+        if isinstance(node, Pattern):
+            print("finded:", node, bb2id)
+            return node
+
+def StructureReconstruction_v2(FF):  # CFG2AST  # CFG2AST
+    blocks, preds, succs, calls = FF
+
+    queue = deque(blocks)
+    while queue:
+        bb = queue.popleft()
+        try: insts = blocks[bb]
+        except KeyError: continue
+        if not succs[bb]:
+            continue
+        print('.' * 100)
+        print(bb2str(bb, insts))
+        match_bb(FF, bb)
+    exit()
+
+
 def call_blocks(insts):
     result = set()
     for inst in insts:
@@ -1417,6 +1546,7 @@ def get_cycles(FF):
             term_inst = blocks[bb][-1]
             if isinstance(term_inst, ReturnStatement):
                 print(" ", term_inst)
+    print()
 
 
 def stage2(gotos):
@@ -1460,7 +1590,7 @@ def stage2(gotos):
     ConstantPropogationAndFolding(FF, DF_LV, dcm)
     ForwardSubstitution(FF, DF_LV)
     MethodCallDeapply(FF)
-    StructureReconstruction(FF)
+    StructureReconstruction_v2(FF)
   # DF_LV = LiveVariables(FF)
     print_cfg(FF) #, DF_LV)
 
