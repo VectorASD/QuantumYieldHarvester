@@ -6,7 +6,7 @@ import re
 from io import StringIO
 
 
-bytecode_path = Path(__file__).parent / "polygon" / "challenge2.js"
+bytecode_path = Path(__file__).resolve().parent.parent / "webdriver" / "polygon" / "challenge2.js"
 match = re.search(rb'a\.init\(\s*"([A-Za-z0-9+/=]+)"', bytecode_path.read_bytes())
 if not match:
     raise RuntimeError("Bytecode string not found")
