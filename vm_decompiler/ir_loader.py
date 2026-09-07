@@ -8,20 +8,7 @@ from .ir import _regbase
 from .ir import RegIndex, RegArray, RegCall, BinOp, LambdaDef, CallDef
 from .ir import Statement, AssignStatement, SetItemStatement, HaltStatement, ReturnStatement, GotoStatement, CondStatement, JumpStatement
 
-
-class Block:
-    def __init__(self, id):
-        self.id = id
-    def __repr__(self):
-        return f"BB{self.id}"
-    def __eq__(self, right):
-        return isinstance(right, Block) and self.id == right.id
-    def __hash__(self):
-        return hash(self.id)
-    def __lt__(self, right):
-        if isinstance(right, Block):
-            return self.id < right.id
-        return NotImplemented
+from .cfg import Block
 
 
 def make_parser():
