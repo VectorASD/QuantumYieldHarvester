@@ -218,38 +218,42 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
             continue
         insts = bb.insts
         term_inst = insts[-1]
-        if branch_checking(bb):
-            pass
-        elif isinstance(term_inst, CondStatement):
+        if isinstance(term_inst, CondStatement):
             target: Block = term_inst.target
             fall: Block = term_inst.fall
             if target == fall:
                 raise RuntimeError("unchecked behavior")
-            r"""
-            if succs[target] == {fall} and set(preds[target]) == {bb} and set(preds[fall]) == {bb, target}:
+            target_preds = set(preds[target])
+            fall_preds   = set(preds[fall])
+            if succs[target] == {fall} and target_preds == {bb} and not ({bb, target} - fall_preds):
                 # bb -> target -> fall
                 #   \            ^
                 #    \----------/
                 assert not calls[target] and not calls[fall]
                 cond = CFG.delete_term(bb).cond
                 then_body = CFG.delete_block(target)
-                fall_body = CFG.delete_block(fall, save_term=True)
                 CFG.extend_block(bb, (IfStatement(cond, then_body),))
-                CFG.extend_block(bb, fall_body)
+                if len(fall_preds) == 2:
+                    fall_body = CFG.delete_block(fall, save_term=True)
+                    CFG.extend_block(bb, fall_body)
+                else:
+                    CFG.extend_block(bb, GotoStatement(fall))
                 update(bb)
-            elif succs[fall] == {target} and set(preds[fall]) == {bb} and set(preds[target]) == {bb, fall}:
+            elif succs[fall] == {target} and fall_preds == {bb} and not ({bb, fall} - target_preds):
                 # bb -> fall -> target
                 #   \          ^
                 #    \--------/
                 assert not calls[fall] and not calls[target]
                 cond = CFG.delete_term(bb).cond
                 then_body = CFG.delete_block(fall)
-                fall_body = CFG.delete_block(target, save_term=True)
                 CFG.extend_block(bb, (IfStatement(InverseReg(cond), then_body),))
-                CFG.extend_block(bb, fall_body)
+                if len(target_preds) == 2:
+                    fall_body = CFG.delete_block(target, save_term=True)
+                    CFG.extend_block(bb, fall_body)
+                else:
+                    CFG.extend_block(bb, GotoStatement(target))
                 update(bb)
-            """
-            if not succs[target] and set(preds[target]) == {bb} and set(preds[fall]) == {bb}:
+            elif not succs[target] and target_preds == {bb} and fall_preds == {bb}:
                 # bb -> target -> return
                 #   \-> fall
                 # bb;
@@ -260,7 +264,7 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
                 CFG.extend_block(bb, (IfStatement(cond, then_body),))
                 CFG.extend_block(bb, fall_body)
                 update(bb)
-            elif not succs[fall] and set(preds[fall]) == {bb} and set(preds[target]) == {bb}:
+            elif not succs[fall] and fall_preds == {bb} and target_preds == {bb}:
                 # bb -> fall -> return
                 #   \-> target
                 # bb;
@@ -268,10 +272,27 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
                 cond = CFG.delete_term(bb).cond
                 then_body = CFG.delete_block(fall, save_term=True)
                 fall_body = CFG.delete_block(target, save_term=True)
-                CFG.extend_block(bb, (IfStatement(InverseReg(cond), then_body),))
+                CFG.extend_block(bb, IfStatement(InverseReg(cond), then_body))
                 CFG.extend_block(bb, fall_body)
                 update(bb)
-            elif succs[target] == {bb} and set(preds[target]) == {bb} and set(preds[fall]) == {bb}:
+            elif target_preds == {bb} and fall_preds == {bb} and len(succs[target]) == 1 and succs[target] == succs[fall] and bb not in succs[target]:
+                #   /-> target -\
+                # bb             |-> other
+                #   \--> fall --/
+                other = next(iter(succs[target]))
+                other_preds = set(preds[other])
+                assert not calls[fall] and not calls[target] and not calls[other]
+                cond = CFG.delete_term(bb).cond
+                then_body = CFG.delete_block(target)
+                else_body = CFG.delete_block(fall)
+                CFG.extend_block(bb, IfStatement(cond, then_body, else_body))
+                if other_preds == {target, fall}:
+                    other_body = CFG.delete_block(other, save_term=True)
+                    CFG.extend_block(bb, other_body)
+                else:
+                    CFG.extend_block(bb, GotoStatement(other))
+                update(bb)
+            elif succs[target] == {bb} and target_preds == {bb} and fall_preds == {bb}:
                 #   /-> fall
                 # bb -> target
                 #  ^          \
@@ -283,7 +304,7 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
                 insts.append(WhileStatement(cond, do_body.copy()))
                 CFG.extend_block(bb, fall_body)
                 update(bb)
-            elif succs[fall] == {bb} and set(preds[fall]) == {bb} and set(preds[target]) == {bb}:
+            elif succs[fall] == {bb} and fall_preds == {bb} and target_preds == {bb}:
                 raise RuntimeError("unchecked!")
                 #   /-> target
                 # bb -> fall
@@ -296,7 +317,7 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
                 insts.append(WhileStatement(cond, do_body.copy()))
                 CFG.extend_block(bb, fall_body)
                 update(bb)
-            elif target == bb and bb in preds[fall]:
+            elif target == bb and bb in fall_preds:
                 # bb -\-> fall
                 #  ^  |
                 #  \--/
@@ -305,13 +326,13 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
                 cycle = DoWhileStatement(cond, insts.copy())
                 insts.clear()
                 insts.append(cycle)
-                if len(preds[fall]) == 1:
+                if len(fall_preds) == 1:
                     fall_body = CFG.delete_block(fall, save_term=True)
                     CFG.extend_block(bb, fall_body)
                 else:
                     CFG.extend_block(bb, GotoStatement(fall))
                 update(bb)
-            elif fall == bb and set(preds[target]) == {bb}:
+            elif fall == bb and target_preds == {bb}:
                 # bb -\-> target
                 #  ^  |
                 #  \--/
@@ -335,6 +356,11 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
                 if not preds[bb] and not calls[bb]:
                     CFG.delete_block(bb)
                 update(bb)
+            elif 0:
+                #  /-> target (break) -> other
+                # bb <- (true) \           ^
+                #  \-> fall ---/- (false) /
+                pass
         elif isinstance(term_inst, GotoStatement):
             target = term_inst.target
             if target == bb:
