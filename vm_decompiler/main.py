@@ -47,6 +47,33 @@ def ForwardSubstitution(CFG):
     blocks, OUT = CFG.blocks, CFG.DF_LV[3]
     def add(name):
         counter[name] += 1
+
+    def next_prev():
+        nonlocal prev_i, prev_inst
+        prev_i -= 1
+        while prev_i >= 0 and insts[prev_i] is None:
+            prev_i -= 1
+        if prev_i < 0 or not isinstance(insts[prev_i], AssignStatement):
+            return True  # break
+        prev_inst = insts[prev_i]
+        return False
+
+    def check_chained_expr(debug = False):
+        prev_reg = prev_inst.reg
+        while prev_reg in handled_uses and counter[prev_reg] == 1:
+            if prev_inst.expr.chain() is None:  # not isPure
+                return False
+            if debug:
+                print(bb)
+                print("INSERT:", prev_inst)
+                print("INTO:  ", inst)
+            if prev_reg in replaces:
+                return True
+            replaces[prev_reg] = prev_inst.expr
+            insts[prev_i] = None
+            if next_prev():
+                return True
+
     for bb, insts in blocks.items():
         counter = defaultdict(int)
         for inst in insts:
@@ -63,16 +90,22 @@ def ForwardSubstitution(CFG):
             inst.uses(uses.append)
             prev_inst: AssignStatement = insts[prev_i]
             replaces = {}
+            handled_uses = []
+          # if bb.id == 13 and isinstance(inst, AssignStatement) and inst.reg == Reg(71):
+          #     print(bb)
             for reg in reversed(uses):
-                if isinstance(reg, Reg) and counter[reg] == 1 and reg == prev_inst.reg:
-                    replaces[reg] = prev_inst.expr
-                    insts[prev_i] = None
-                    prev_i -= 1
-                    while prev_i >= 0 and insts[prev_i] is None:
-                        prev_i -= 1
-                    if prev_i < 0 or not isinstance(insts[prev_i], AssignStatement):
+                if isinstance(reg, Reg) and counter[reg] == 1:
+                    if check_chained_expr():
                         break
-                    prev_inst = insts[prev_i]
+                    if reg == prev_inst.reg:
+                        if reg in replaces:
+                            break
+                        replaces[reg] = prev_inst.expr
+                        insts[prev_i] = None
+                        if next_prev():
+                            break
+                handled_uses.append(reg)
+            check_chained_expr()
             if replaces:
                 inst.replace(replaces.get)
                 need_clean = True
@@ -192,7 +225,7 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
             fall: Block = term_inst.fall
             if target == fall:
                 raise RuntimeError("unchecked behavior")
-            """
+            r"""
             if succs[target] == {fall} and set(preds[target]) == {bb} and set(preds[fall]) == {bb, target}:
                 # bb -> target -> fall
                 #   \            ^

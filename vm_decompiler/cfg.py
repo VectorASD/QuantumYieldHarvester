@@ -41,7 +41,8 @@ class Block:
             write(f"\n{pad}DELETED")
         else:
             for inst in self.insts:
-                write(f"\n{inst.__repr__(pad=pad)}")
+                write('\n')
+                write(f"{pad}NONE" if inst is None else inst.__repr__(pad=pad))
         return buffer.getvalue()
 
     def __eq__(self, right):
