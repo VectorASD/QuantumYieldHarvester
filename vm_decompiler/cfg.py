@@ -9,7 +9,7 @@ from .ir import RegArray, CallExpression
 from .ir import Statement, AssignStatement, ReturnStatement, GotoStatement, CondStatement, JumpStatement, TermStatement
 
 
-SKIP_FUNC_BLOCKS_IN_CFG = False
+SKIP_FUNC_BLOCKS_IN_CFG = True
 
 
 RED    = "\33[91m"
@@ -153,7 +153,7 @@ class CFG:
         self.add_term(bb, term)
 
 
-    def extend_block(self, bb: str, insts: Iterable[Statement]):
+    def extend_block(self, bb: str, insts: Iterable[Statement]|Statement):
         if self.has_term(bb):
             raise RuntimeError("Cannot add instructions to a basic block that already has a terminator")
 
@@ -162,6 +162,9 @@ class CFG:
             calls[node.goto].add(bb)
             call_dsts[bb].append(node.goto)
         traverse = {call_type: call_traverse for call_type in CallExpression.__args__}.get
+
+        if isinstance(insts, Statement):
+            insts = (insts,)
 
         add_inst = bb.insts.append
         it = iter(insts)
@@ -183,9 +186,9 @@ class CFG:
         call_dsts[block] = []
         self.extend_block(block, insts)
 
-    def delete_block(self, bb: Block, *, save_term: bool = False):
+    def delete_block(self, bb: Block, *, save_term: bool = False, check_preds = True):
         blocks, preds, succs, calls, call_dsts = self.FF
-        if preds[bb] or calls[bb]:
+        if (check_preds and preds[bb]) or calls[bb]:
             raise RuntimeError(f"can't delete this {bb!r}: preds={preds[bb]}, calls={calls[bb]}")
         if self.has_term(bb):
             self.delete_term(bb, save_term=save_term)
@@ -194,7 +197,9 @@ class CFG:
         for goto in call_dsts[bb].copy():
             calls[goto].discard(bb)
             call_dsts[bb].remove(goto)
-        del blocks[bb], preds[bb], succs[bb], calls[bb], call_dsts[bb]
+        del blocks[bb], succs[bb], calls[bb], call_dsts[bb]
+        if check_preds:
+            del preds[bb]
         bb.deleted = True
         return bb.insts
 

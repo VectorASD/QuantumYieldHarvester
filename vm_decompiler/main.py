@@ -115,6 +115,69 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
             print(fall)
           # print(succs[target] == {bb}, set(preds[target]) == {bb}, set(preds[fall]) == {bb})
 
+    def branch_checking(end_bb, debug=True):
+        """
+        Temporary solution that helped uncover a hidden trap:
+        we do NOT necessarily have to attach the fall branch after IfStatement and WhileStatement!
+        If preds prevents doing that, just use GotoStatement instead.
+        Then the purpose of branch_checking disappears, ordinary Ifs can do the same!
+        """
+        end_preds = preds[end_bb]
+        if len(end_preds) < 2:
+            return False
+        debug = len(end_preds) == 3
+
+        term_bb = None
+        for bb in end_preds:
+            term = bb.insts[-1]
+            if isinstance(term, GotoStatement):
+                if term_bb is not None or term.target != end_bb:
+                    return False
+                term_bb = bb
+
+        cond_chain = []
+        bb = term_bb
+        for i in range(len(end_preds) - 1):
+            bb_preds = preds[bb]
+            if len(bb_preds) != 1:
+                return False
+            prev_bb, bb = bb, bb_preds[0]
+            term = bb.insts[-1]
+            if not isinstance(term, CondStatement):
+                return False
+            target, fall = term.target, term.fall
+            if target == prev_bb and fall == end_bb:
+                cond_chain.append((bb, False))
+            elif target == end_bb and fall == prev_bb:
+                cond_chain.append((bb, True))
+            else:
+                return False
+
+        if debug:
+            print("checked:")
+            for bb, inv in reversed(cond_chain):
+                print(inv, bb)
+            print(term_bb)
+            print(end_bb)
+
+        prev_bb = term_bb
+        for bb, inv in cond_chain:
+            then_body = CFG.delete_block(prev_bb, check_preds=False)
+            prev_bb = bb
+            cond = CFG.delete_term(bb).cond
+            if inv:
+                cond = InverseReg(cond)
+            CFG.extend_block(bb, (IfStatement(cond, then_body),))
+        fall_body = CFG.delete_block(end_bb, save_term=True)
+        CFG.extend_block(bb, fall_body)
+        if debug:
+            print("\nJOINED:")
+            print(bb)
+            print("-" * 100)
+            print()
+        update(bb)
+        return True
+
     queue = deque(blocks)
     while queue:
         bb: Block = queue.popleft()
@@ -122,11 +185,14 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
             continue
         insts = bb.insts
         term_inst = insts[-1]
-        if isinstance(term_inst, CondStatement):
+        if branch_checking(bb):
+            pass
+        elif isinstance(term_inst, CondStatement):
             target: Block = term_inst.target
             fall: Block = term_inst.fall
             if target == fall:
                 raise RuntimeError("unchecked behavior")
+            """
             if succs[target] == {fall} and set(preds[target]) == {bb} and set(preds[fall]) == {bb, target}:
                 # bb -> target -> fall
                 #   \            ^
@@ -149,7 +215,8 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
                 CFG.extend_block(bb, (IfStatement(InverseReg(cond), then_body),))
                 CFG.extend_block(bb, fall_body)
                 update(bb)
-            elif not succs[target] and set(preds[target]) == {bb} and set(preds[fall]) == {bb}:
+            """
+            if not succs[target] and set(preds[target]) == {bb} and set(preds[fall]) == {bb}:
                 # bb -> target -> return
                 #   \-> fall
                 # bb;
@@ -196,17 +263,20 @@ def StructureReconstruction(CFG: CFG):  # CFG2AST
                 insts.append(WhileStatement(cond, do_body.copy()))
                 CFG.extend_block(bb, fall_body)
                 update(bb)
-            elif target == bb and set(preds[fall]) == {bb}:
+            elif target == bb and bb in preds[fall]:
                 # bb -\-> fall
                 #  ^  |
                 #  \--/
                 assert not calls[fall]
                 cond = CFG.delete_term(bb).cond
-                fall_body = CFG.delete_block(fall, save_term=True)
                 cycle = DoWhileStatement(cond, insts.copy())
                 insts.clear()
                 insts.append(cycle)
-                CFG.extend_block(bb, fall_body)
+                if len(preds[fall]) == 1:
+                    fall_body = CFG.delete_block(fall, save_term=True)
+                    CFG.extend_block(bb, fall_body)
+                else:
+                    CFG.extend_block(bb, GotoStatement(fall))
                 update(bb)
             elif fall == bb and set(preds[target]) == {bb}:
                 # bb -\-> target
