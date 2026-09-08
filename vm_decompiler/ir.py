@@ -10,6 +10,8 @@ class Null:
 
 type Const = str | int | float | bool
 
+INDENT = "  "
+
 
 class Expression:
     def replace(self, get):
@@ -244,14 +246,14 @@ class LambdaDef(Expression):
         if self.args:
             write(f"        {str(self.args)[1:-1]} = arguments\n")
         write(f"        reg_backups.push([regs[:], {_regbase[201]!r})\n")
-        write(f"        call {self.goto} while !{_regbase[201]}\n")
+        write(f"        call {self.goto!r} while !{_regbase[201]}\n")
         write(f"        return (delete {_regbase[201]})\n")
         write("      }")
         return buffer.getvalue()
     def __repr__(self):
         if self.args:
-            return f"lambda *a: call {self.goto} ({self.args} = a)"
-        return f"lambda: call {self.goto} ()"
+            return f"lambda *a: call {self.goto!r} ({self.args} = a)"
+        return f"lambda: call {self.goto!r} ()"
     def uses(self, add):
         pass
     def traverse(self, get):
@@ -266,7 +268,7 @@ class CallDef(Expression):
         assert len(dsts) == len(srcs)
     def __repr__(self):
         args = ", ".join(f'{dst} = {src}' for dst, src in zip(self.dsts, self.srcs))
-        return f"call {self.goto} ({args})"
+        return f"call {self.goto!r} ({args})"
     def uses(self, add):
         for src in self.srcs:
             if isinstance(src, Expression):
@@ -404,7 +406,10 @@ class GotoStatement(Statement):
     def __init__(self, target):
         self.target = target
     def __repr__(self, pad=""):
-        return f"{pad}goto {self.target}"
+        return f"{pad}goto {self.target!r}"
+    def replace_bb(self, what, to):
+        if self.target == what:
+            self.target = to
 
 class CondStatement(Statement):
     def __init__(self, target, condition: Expression|Const, fall):
@@ -412,7 +417,7 @@ class CondStatement(Statement):
         self.cond = condition
         self.fall = fall
     def __repr__(self, pad=""):
-        return f"{pad}goto {self.target} if {self.cond} else {self.fall}"
+        return f"{pad}goto {self.target!r} if {self.cond} else {self.fall!r}"
     def uses(self, add):
         if isinstance(self.cond, Expression):
             self.cond.uses(add)
@@ -424,8 +429,14 @@ class CondStatement(Statement):
         Statement.traverse(self, get)
         if isinstance(self.cond, Expression):
             self.cond.traverse(get)
+    def replace_bb(self, what, to):
+        if self.target == what:
+            self.target = to
+        if self.fall == what:
+            self.fall = to
 
 JumpStatement = GotoStatement | CondStatement
+TermStatement = JumpStatement | ReturnStatement | HaltStatement
 
 
 class IfStatement(Statement):
@@ -434,7 +445,7 @@ class IfStatement(Statement):
         self.then_stmts = then_stmts
         self.else_stmts = else_stmts or ()
     def __repr__(self, pad=""):
-        next_pad = pad + "  "
+        next_pad = pad + INDENT
         then_stmts, else_stmts = self.then_stmts, self.else_stmts
         buffer = StringIO()
         write = buffer.write
@@ -495,7 +506,7 @@ class WhileStatement(Statement):
         self.cond = cond
         self.body = body
     def __repr__(self, pad=""):
-        next_pad = pad + "  "
+        next_pad = pad + INDENT
         body = self.body
         buffer = StringIO()
         write = buffer.write
@@ -533,7 +544,7 @@ class DoWhileStatement(Statement):
         self.cond = cond
         self.body = body
     def __repr__(self, pad=""):
-        next_pad = pad + "  "
+        next_pad = pad + INDENT
         body = self.body
         buffer = StringIO()
         write = buffer.write

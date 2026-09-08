@@ -1,3 +1,12 @@
+if __name__ == "__main__":
+    from pathlib import Path
+    import sys
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    from vm_decompiler.main import main
+    main()
+    exit()
+    
+
 from collections import deque, defaultdict
 from pathlib import Path
 
@@ -6,20 +15,18 @@ from .ir import Expression, RegIndex, RegCall, InverseReg
 from .ir import AssignStatement, HaltStatement, ReturnStatement, GotoStatement, CondStatement
 from .ir import IfStatement, WhileStatement, DoWhileStatement
 
-from .cfg import bb2str, print_cfg, make_cfg, check_cfg
-from .cfg import common_join_cfg, join_cfg, replace_term, delete_block
-from .cfg import get_cycles, check_users
-from .cfg import LiveVariables, _id2shift, clean_insts, mask2regs
+from .cfg import Block, CFG, make_cfg
+from .cfg import _id2shift, mask2regs
 
 from .ir_loader import parse_bytecode
 
 
-def ConstantPropogationAndFolding(FF, DF_LV, default_const_map):
-    blocks = FF[0]
-    OUT = DF_LV[3]
+def ConstantPropogationAndFolding(CFG):
+    blocks = CFG.blocks
+    OUT, dcm = CFG.DF_LV[3], CFG.default_const_map
     for bb, insts in blocks.items():
         out = OUT[bb]
-        const_map = default_const_map.copy()
+        const_map = dcm.copy()
         for i, inst in enumerate(insts):
             if inst.isconst:  # <reg> = <const>
                 const_map[inst.reg] = inst.expr
@@ -33,12 +40,11 @@ def ConstantPropogationAndFolding(FF, DF_LV, default_const_map):
                 if not (out & _id2shift[inst.reg.id]):
                     insts[i] = None
         if const_map:
-            clean_insts(insts)
+            bb.clean_insts()
 
-def ForwardSubstitution(FF, DF_LV):
+def ForwardSubstitution(CFG):
     """Do not call a second time, otherwise we will with `100% probability` break the original execution order of instructions!"""
-    blocks = FF[0]
-    OUT = DF_LV[3]
+    blocks, OUT = CFG.blocks, CFG.DF_LV[3]
     def add(name):
         counter[name] += 1
     for bb, insts in blocks.items():
@@ -71,10 +77,10 @@ def ForwardSubstitution(FF, DF_LV):
                 inst.replace(replaces.get)
                 need_clean = True
         if need_clean:
-            clean_insts(insts)
+            bb.clean_insts()
 
-def MethodCallDeapply(FF):
-    blocks = FF[0]
+def MethodCallDeapply(CFG):
+    blocks = CFG.blocks
     def reg_call_traverse(node):
         func = node.func
         if isinstance(func, RegIndex):
@@ -92,36 +98,33 @@ def MethodCallDeapply(FF):
         for inst in insts:
             inst.traverse(traverse)
 
-def StructureReconstruction(FF):  # CFG2AST
-    blocks, preds, succs, calls = FF
+def StructureReconstruction(CFG: CFG):  # CFG2AST
+    blocks, preds, succs, calls, _ = CFG.FF
 
-    call_dsts = {bb: set() for bb in blocks}
-    for dst, sources in calls.items():
-        for src in sources:
-            call_dsts[src].add(dst)
-    fixFF = preds, succs, calls, call_dsts
-
-    def update(bb):
+    def update(bb, check=True):
         queue.extend(preds[bb])
         queue.append(bb)
         queue.extend(succs[bb])
+        if check:
+            CFG.check()  # TODO: delete it...
 
     def analyze(bb, id):
         if bb.id == id:
-            print(bb2str(bb, insts))
-            print(bb2str(target, blocks[target]))
-            print(bb2str(fall, blocks[fall]))
+            print(bb)
+            print(target)
+            print(fall)
           # print(succs[target] == {bb}, set(preds[target]) == {bb}, set(preds[fall]) == {bb})
 
     queue = deque(blocks)
     while queue:
-        bb = queue.popleft()
-        try: insts = blocks[bb]
-        except KeyError: continue
+        bb: Block = queue.popleft()
+        if bb.deleted:
+            continue
+        insts = bb.insts
         term_inst = insts[-1]
         if isinstance(term_inst, CondStatement):
-            target = term_inst.target
-            fall = term_inst.fall
+            target: Block = term_inst.target
+            fall: Block = term_inst.fall
             if target == fall:
                 raise RuntimeError("unchecked behavior")
             if succs[target] == {fall} and set(preds[target]) == {bb} and set(preds[fall]) == {bb, target}:
@@ -129,58 +132,44 @@ def StructureReconstruction(FF):  # CFG2AST
                 #   \            ^
                 #    \----------/
                 assert not calls[target] and not calls[fall]
-                # blocks
-                cond = insts.pop().cond
-                then_stmts = blocks.pop(target)
-                then_stmt = then_stmts.pop()
-                assert isinstance(then_stmt, GotoStatement) and then_stmt.target == fall
-                insts.append(IfStatement(cond, then_stmts))
-                insts.extend(blocks.pop(fall))
-                # CFG
-                join_cfg(bb, target, fall, fixFF)
+                cond = CFG.delete_term(bb).cond
+                then_body = CFG.delete_block(target)
+                fall_body = CFG.delete_block(fall, save_term=True)
+                CFG.extend_block(bb, (IfStatement(cond, then_body),))
+                CFG.extend_block(bb, fall_body)
                 update(bb)
             elif succs[fall] == {target} and set(preds[fall]) == {bb} and set(preds[target]) == {bb, fall}:
                 # bb -> fall -> target
                 #   \          ^
                 #    \--------/
                 assert not calls[fall] and not calls[target]
-                # blocks
-                cond = insts.pop().cond
-                then_stmts = blocks.pop(fall)
-                then_stmt = then_stmts.pop()
-                assert isinstance(then_stmt, GotoStatement) and then_stmt.target == target
-                insts.append(IfStatement(InverseReg(cond), then_stmts))
-                insts.extend(blocks.pop(target))
-                # CFG
-                join_cfg(bb, fall, target, fixFF)
+                cond = CFG.delete_term(bb).cond
+                then_body = CFG.delete_block(fall)
+                fall_body = CFG.delete_block(target, save_term=True)
+                CFG.extend_block(bb, (IfStatement(InverseReg(cond), then_body),))
+                CFG.extend_block(bb, fall_body)
                 update(bb)
             elif not succs[target] and set(preds[target]) == {bb} and set(preds[fall]) == {bb}:
                 # bb -> target -> return
                 #   \-> fall
                 # bb;
                 assert not calls[target] and not calls[fall]
-                # blocks
-                cond = insts.pop().cond
-                then_stmts = blocks.pop(target)
-                assert isinstance(then_stmts[-1], ReturnStatement)
-                insts.append(IfStatement(cond, then_stmts))
-                insts.extend(blocks.pop(fall))
-                # CFG
-                join_cfg(bb, target, fall, fixFF)
+                cond = CFG.delete_term(bb).cond
+                then_body = CFG.delete_block(target, save_term=True)
+                fall_body = CFG.delete_block(fall, save_term=True)
+                CFG.extend_block(bb, (IfStatement(cond, then_body),))
+                CFG.extend_block(bb, fall_body)
                 update(bb)
             elif not succs[fall] and set(preds[fall]) == {bb} and set(preds[target]) == {bb}:
                 # bb -> fall -> return
                 #   \-> target
                 # bb;
                 assert not calls[fall] and not calls[target]
-                # blocks
-                cond = insts.pop().cond
-                then_stmts = blocks.pop(fall)
-                assert isinstance(then_stmts[-1], ReturnStatement)
-                insts.append(IfStatement(InverseReg(cond), then_stmts))
-                insts.extend(blocks.pop(target))
-                # CFG
-                join_cfg(bb, fall, target, fixFF)
+                cond = CFG.delete_term(bb).cond
+                then_body = CFG.delete_block(fall, save_term=True)
+                fall_body = CFG.delete_block(target, save_term=True)
+                CFG.extend_block(bb, (IfStatement(InverseReg(cond), then_body),))
+                CFG.extend_block(bb, fall_body)
                 update(bb)
             elif succs[target] == {bb} and set(preds[target]) == {bb} and set(preds[fall]) == {bb}:
                 #   /-> fall
@@ -188,16 +177,11 @@ def StructureReconstruction(FF):  # CFG2AST
                 #  ^          \
                 #   \---------/
                 assert not calls[target] and not calls[fall]
-                # blocks
-                cond = insts.pop().cond
-                body_stmts = blocks.pop(target)
-                body_stmt = body_stmts.pop()
-                assert isinstance(body_stmt, GotoStatement) and body_stmt.target == bb
-                insts.append(WhileStatement(cond, body_stmts))
-                insts.extend(blocks.pop(fall))
-                # CFG
-                join_cfg(bb, target, fall, fixFF)
-                preds[bb].remove(target)
+                cond = CFG.delete_term(bb).cond
+                do_body = CFG.delete_block(target)
+                fall_body = CFG.delete_block(fall, save_term=True)
+                insts.append(WhileStatement(cond, do_body.copy()))
+                CFG.extend_block(bb, fall_body)
                 update(bb)
             elif succs[fall] == {bb} and set(preds[fall]) == {bb} and set(preds[target]) == {bb}:
                 raise RuntimeError("unchecked!")
@@ -206,85 +190,77 @@ def StructureReconstruction(FF):  # CFG2AST
                 #  ^        \
                 #   \-------/
                 assert not calls[fall] and not calls[target]
-                # blocks
-                cond = insts.pop().cond
-                body_stmts = blocks.pop(fall)
-                body_stmt = body_stmts.pop()
-                assert isinstance(body_stmt, GotoStatement) and body_stmt.target == bb
-                insts.append(WhileStatement(InverseReg(cond), body_stmts))
-                insts.extend(blocks.pop(target))
-                # CFG
-                join_cfg(bb, fall, target, fixFF)
-                preds[bb].remove(fall)
+                cond = CFG.delete_term(bb).cond
+                do_body = CFG.delete_block(fall)
+                fall_body = CFG.delete_block(target, save_term=True)
+                insts.append(WhileStatement(cond, do_body.copy()))
+                CFG.extend_block(bb, fall_body)
                 update(bb)
             elif target == bb and set(preds[fall]) == {bb}:
                 # bb -\-> fall
                 #  ^  |
                 #  \--/
-                # blocks
-                cond = insts.pop().cond
-                blocks[bb] = [DoWhileStatement(cond, insts), *blocks.pop(fall)]
-                # CFG
-                succs[bb].remove(bb)
-                preds[bb].remove(bb)
-                common_join_cfg(bb, fall, fixFF)
+                assert not calls[fall]
+                cond = CFG.delete_term(bb).cond
+                fall_body = CFG.delete_block(fall, save_term=True)
+                cycle = DoWhileStatement(cond, insts.copy())
+                insts.clear()
+                insts.append(cycle)
+                CFG.extend_block(bb, fall_body)
+                update(bb)
+            elif fall == bb and set(preds[target]) == {bb}:
+                # bb -\-> target
+                #  ^  |
+                #  \--/
+                raise RuntimeError("unchecked!")
+                assert not calls[target]
+                cond = CFG.delete_term(bb).cond
+                fall_body = CFG.delete_block(target, save_term=True)
+                cycle = DoWhileStatement(cond, insts.copy())
+                insts.clear()
+                insts.append(cycle)
+                CFG.extend_block(bb, fall_body)
                 update(bb)
             elif len(insts) == 1:
                 # preds -> bb (single cond) -> target
                 #                          \-> fall
-                update(bb)
                 term = insts[-1]
                 for pred in preds[bb]:
                     pred_term = blocks[pred][-1]
                     if isinstance(pred_term, GotoStatement):
-                        replace_term(FF, pred, term)
+                        CFG.replace_term(pred, term)
                 if not preds[bb] and not calls[bb]:
-                    delete_block(FF, bb)
+                    CFG.delete_block(bb)
+                update(bb)
         elif isinstance(term_inst, GotoStatement):
             target = term_inst.target
-            if set(preds[target]) == {bb}:
+            if target == bb:
+                # bb -> bb
+                assert not calls[target]
+                CFG.delete_term(bb)
+                cycle = WhileStatement(1, insts.copy())
+                insts.clear()
+                insts.append(cycle)
+                update(bb)
+            elif set(preds[target]) == {bb}:
                 # bb -> target
                 assert not calls[target]
-                # blocks
-                insts.pop()
-                insts.extend(blocks.pop(target))
-                # CFG
-                common_join_cfg(bb, target, fixFF)
-                update(bb)
-            elif target == bb:
-                # bb -> bb
-                # blocks
-                insts.pop()
-                blocks[bb] = [WhileStatement(1, insts)]
-                # CFG
-                succs[bb].remove(bb)
-                preds[bb].remove(bb)
+                CFG.delete_term(bb)
+                next_body = CFG.delete_block(target, save_term=True)
+                CFG.extend_block(bb, next_body)
                 update(bb)
             elif len(insts) == 1:
                 # preds -> bb (single goto) -> target
+                assert not calls[bb]
+                queue.extend(preds[bb])
+                queue.extend(succs[bb])
                 for pred in preds[bb]:
-                    pred_term = blocks[pred][-1]
-                    if not isinstance(pred_term, CondStatement):
-                        raise RuntimeError("CondStatement in StructureReconstruction(preds -> bb (single goto) -> target) temporary not supported...")
-                    assert not calls[bb]
-                    # blocks
-                    p_target = pred_term.target
-                    p_fall = pred_term.fall
-                    if p_target == bb:
-                        pred_term.target = target
-                    if p_fall == bb:
-                        pred_term.fall = target
-                  # print(p_target, p_fall, bb, target)
-                    # CFG
-                    succs[pred].discard(bb)
-                    succs[pred].add(target)
-                    queue.append(pred)
-                preds[target].remove(bb)
-                preds[target].extend(preds[bb])
-                update(bb)
-                del blocks[bb], preds[bb], succs[bb], calls[bb]
-                check_cfg(FF)
-    check_cfg(FF)
+                    pred_term = CFG.delete_term(pred)
+                    pred_term.replace_bb(bb, target)
+                    CFG.add_term(pred, pred_term)
+                CFG.delete_block(bb)
+                CFG.check()
+    CFG.check()
 
 
 class Pattern:
@@ -406,12 +382,13 @@ def StructureReconstruction_v2(FF):  # CFG2AST  # CFG2AST
     queue = deque(blocks)
     while queue:
         bb = queue.popleft()
-        try: insts = blocks[bb]
-        except KeyError: continue
+        if bb.deleted:
+            continue
+        insts = bb.insts
         if not succs[bb]:
             continue
         print('.' * 100)
-        print(bb2str(bb, insts))
+        print(bb)
         match_bb(FF, bb)
     exit()
 
@@ -419,18 +396,18 @@ def StructureReconstruction_v2(FF):  # CFG2AST  # CFG2AST
 def main():
     bytecode_path = Path(__file__).resolve().parent.parent / "webdriver" / "polygon" / "challenge2.js"
     blocks = parse_bytecode(bytecode_path)
+  # print(*blocks, sep="\n\n")
 
-    FF = make_cfg(blocks)
-    dcm = check_users(FF)  # default_const_map
-    get_cycles(FF)
-    DF_LV = LiveVariables(FF)
-    ConstantPropogationAndFolding(FF, DF_LV, dcm)
-    ForwardSubstitution(FF, DF_LV)
-    MethodCallDeapply(FF)
-    StructureReconstruction_v2(FF)
-  # DF_LV = LiveVariables(FF)
-    print_cfg(FF) #, DF_LV)
-
-
-if __name__ == "__main__":
-    main()
+    CFG = make_cfg(blocks)
+    CFG.check_users()
+    CFG.get_cycles()
+    CFG.LiveVariables()
+    ConstantPropogationAndFolding(CFG)
+    ForwardSubstitution(CFG)
+    MethodCallDeapply(CFG)
+    StructureReconstruction(CFG)
+  # StructureReconstruction_v2(CFG)
+  # CFG.LiveVariables()
+    CFG.DF_LV = None
+    print(CFG)
+    print("OK")

@@ -287,22 +287,23 @@ def make_parser():
         print("ungotos:", len(ungotos))
         return gotos
 
-    def stage2(gotos):
+    def stage2(gotos: set[int]):
         nonlocal pos
 
         _range = range(len(bytecode))
         for goto in gotos:
             assert goto in _range
 
-        gotos.add(len(bytecode))
-        gotos = sorted(gotos)
-        goto2bb = {goto: Block(i) for i, goto in enumerate(gotos)}
-        blocks: dict[Block, list[Statement]] = {}
+        gotos: list[int] = sorted(gotos)
+        blocks: list[Block] = [Block(i) for i in range(len(gotos))]
+        goto2bb = dict(zip(gotos, blocks))
 
+        gotos.append(len(bytecode))
         for i in range(len(gotos) - 1):
             start_pos = pos = gotos[i]
             end_pos = gotos[i+1]
-            insts = blocks[goto2bb[start_pos]] = []
+
+            insts = goto2bb[start_pos].insts
             add = insts.append
             while pos < end_pos:
                 kind = getByte()
